@@ -1,0 +1,694 @@
+---
+title: "Exploring thermal effects using Thermizer"
+author: "Ezekiel"
+date: "2026-01-30"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Set up directories
+```{r dirs, include=FALSE}
+# Chunk renamed from "setup" (it was the second chunk with that label, and
+# knitr aborts on duplicates, so this file could not be knitted).
+
+library("here")
+# root.dir set from here() rather than a hardcoded absolute path: the previous
+# value pointed at a Dropbox location that does not exist on other machines,
+# so every relative path below would have broken on knit.
+knitr::opts_knit$set(root.dir = here())
+# file.path, not paste0: here() has no trailing slash, so the old form produced
+# ".../Thermal-effect-thermizerEss_Thermizer_Output/".
+save_dir <- file.path(here(), "Ess_Thermizer_Output")
+```
+
+LOAD Library
+```{r}
+## Required for starters
+# install.packages("remotes")
+
+# Update mizerExperimental
+#remotes::install_github("sizespectrum/mizerExperimental", force = TRUE)
+
+# Update other extensions you might use (e.g., therMizer)
+#remotes::install_github("sizespectrum/therMizer", force = TRUE)
+
+
+library(therMizer)
+library(ggplot2)
+library(mizer)
+library(assertthat)
+#library(optimParallel)
+library(here)
+library(tidyr)
+library(dplyr)
+library(mizerExperimental)
+library(tidyverse)
+library(pbapply)
+library(patchwork)
+
+# The project's single functions file. Supplies fishing_gears, plotYieldExcl and
+# plotFMortExcl (seals act in the model but are excluded from yield and F
+# accounting), the custom biomass-cutoff calibration helpers, and
+# gaussian_sizeweight -- which must be in scope BEFORE any setParams()-triggering
+# call, because it is the sel_func for all 19 Seals gear rows.
+source("Ess_data/Useful_functions.R")
+
+```
+
+#Load params from base mizer calibration 
+# Add in Thermal range 
+# all prefrences were from fish base
+## DFO. 2014. Assessment of Spiny Dogfish in the Northwest Atlantic. DFO Can. Sci. Advis. Sec.
+## Sci. Advis. Rep. 2014/055.
+```{r}
+
+#use stage 1 because stage 2 is not stable
+params <- readRDS("Ess_data/params_stage1_steady.RDS")
+thermal_data<- read.csv("Ess_Thermizer_data/species_params_with_temp.csv")
+
+# thermal_data rows are assumed to align positionally with species_params.
+# They do today (same 19 species, same order), but assert it: a silent
+# reorder would assign thermal limits to the wrong species.
+stopifnot(identical(as.character(thermal_data$Common_Name),
+                    as.character(params@species_params$species)))
+params@species_params$temp_min <- thermal_data$TempPrefMin
+params@species_params$temp_max <- thermal_data$TempPrefMax
+
+# ---- Documented departures from the FishBase estimate() baseline -----------
+# FishBase TempPrefMin/Max come from estimate(), which is the AquaMaps-derived
+# environmental envelope: an occurrence (realised-niche) range, not
+# physiological limits. therMizer uses these as a thermal PERFORMANCE curve, so
+# where the envelope disagrees with where the species actually lives on this
+# shelf, the scaling collapses to zero. Three species need attention.
+set_temp <- function(p, sp, tmin, tmax) {
+  i <- which(p@species_params$species == sp)
+  stopifnot(length(i) == 1)
+  p@species_params$temp_min[i] <- tmin
+  p@species_params$temp_max[i] <- tmax
+  p
+}
+
+# 1-2. Capelin and Red Hake were PROXY-FILLED in 00.Params_extraction.R
+# (proxy_map: Mallotus villosus <- Clupea harengus, Urophycis chuss <-
+# Urophycis tenuis) because FishBase had no TempPref for them at the time. It
+# does now, so use the real values. Capelin moves a long way and the new range
+# is much more plausible for a cold-water species: its optimum lands at 4.85 C,
+# essentially the deep-stratum reference temperature of 4.03 C.
+#params <- set_temp(params, "Capelin",  0.3,  7.1)   # was 0.5-11.2 (herring proxy)
+#params <- set_temp(params, "Red Hake", 1.6, 11.1)   # was 1.2-7.8  (white hake proxy)
+
+# 3. Spiny Dogfish: the only species whose scaling is exactly ZERO at the
+# reference state. It is weighted 100% to r50to150 at 4.03 C while FishBase
+# gives temp_min = 4.2, so it is below its lower limit everywhere it exists.
+# FishBase stocks() is worse (7.0-15.0), so neither FishBase source works.
+## DFO. 2014. Assessment of Spiny Dogfish in the Northwest Atlantic. DFO Can. Sci. Advis. Sec.
+## Sci. Advis. Rep. 2014/055.
+params <- set_temp(params, "Spiny Dogfish", 0, 12)
+
+# 4. Thorny Skate: same failure mode as the dogfish. estimate()/AquaMaps gives
+# -0.8 to 5.0 with a MEAN of 1.0 C, which describes the Arctic core of the
+# distribution rather than the thermal tolerance. It places the whole shallow
+# stratum (6.66 C) outside the species' range, which contradicts the survey:
+# thorny skate is spread across 8 strata and makes up 18.4% of stratum 447, so
+# it plainly occupies water warmer than 5 C on this shelf.
+#
+# The consequence is not visible at the reference state, where it still scores
+# 0.709, but it is severe through the run. Under the AquaMaps range the shallow
+# realm contributes exactly zero in every year, and the deep realm reaches
+# 4.86 C by 2015-24, within 0.14 C of tmax, so performance more than halves
+# (0.723 -> 0.317) and hits zero entirely once the deep stratum passes 5.0 C.
+# That is an artifact of the envelope, not a thermal response.
+#
+# stocks() gives -1.3 to 14.0 with EnvTemp "boreal", the reported occurrence
+# range, which accommodates the shelf.
+params <- set_temp(params, "Thorny Skate", -1.3, 14.0)   # was -0.8-5.0 (AquaMaps envelope)
+
+# Sanity check: no species should have zero thermal scaling at the reference
+# state, since that is a hard extinction rather than a gradient.
+stopifnot(all(params@species_params$temp_max > params@species_params$temp_min))
+
+```
+
+
+### Setting up the resource:
+Load resource spectra 
+```{r}
+# ==========================================================
+# STEADY STATE ONLY. This script calibrates therMizer at REFERENCE-PERIOD MEAN
+# conditions, so it needs the 1978-81 mean resource, not the time series. The
+# time-varying forcing belongs to the dynamic runs.
+#
+# 1978-81 is Paper 1's Stage-1 reference, chosen there by a rolling-window
+# stationarity screen of the survey biomass (cod CV 0.12, no detectable trend).
+# Pinning it here means the steady state is comparable with Paper 1 whatever
+# window the dynamic runs use.
+# ==========================================================
+reference_years <- 1978:1981
+
+spectra_file <- "Ess_Thermizer_data/GFDL_resource_spectra.dat"
+isimip_plankton <- as.matrix(read.table(spectra_file, header = TRUE, check.names = FALSE))
+# 04 now writes year row names; fall back to counting from 1961 if absent
+if (is.null(rownames(isimip_plankton)) || anyNA(suppressWarnings(as.numeric(rownames(isimip_plankton))))) {
+  rownames(isimip_plankton) <- 1961:(1961 + nrow(isimip_plankton) - 1)
+}
+stopifnot(all(as.character(reference_years) %in% rownames(isimip_plankton)))
+stopifnot(ncol(isimip_plankton) == length(params@w_full))   # 04 must match this base
+
+sizes <- names(params@initial_n_pp)
+
+# Resource at reference conditions: the 1978-81 mean of the forcing, used
+# DIRECTLY as the resource rather than as an anomaly on Paper 1's calibrated
+# resource.
+#
+# This changed once 04's unit errors were fixed. Previously the spectra were
+# only usable as departures, because their absolute level was wrong: plankton
+# abundance was fitted per size CLASS and read off per mizer BIN (classes are
+# ~30x wider), class sizes used the arithmetic rather than the geometric mean
+# of the ESD bounds (a factor of 129 in mass for zmeso), and x1.03/x0.85
+# scalings were applied to slope and intercept to force the result back into
+# range. With those fixed the spectrum is an absolute resource density derived
+# from COBALT carbon, and it independently reproduces the resource mizer
+# arrived at by calibration: slope -1.995 against -2.050, level 0.74x, with
+# the carbon-to-wet-weight factor the only free constant and left at its
+# literature value. So there is no longer a reason to anchor to Paper 1, and
+# doing so would discard the information in the forcing's absolute level.
+#
+# plankton_forcing() reads 10^(n_pp_array)/dw_full, so this is log10 numbers
+# per bin, the same convention 04 writes.
+ref_spec <- colMeans(isimip_plankton[as.character(reference_years), , drop = FALSE])
+n_pp_ref <- ref_spec
+
+message("resource reference: ", min(reference_years), "-", max(reference_years),
+        " mean, used directly (", nrow(isimip_plankton), " years available: ",
+        rownames(isimip_plankton)[1], "-",
+        rownames(isimip_plankton)[nrow(isimip_plankton)], ")")
+ok_pp <- params@initial_n_pp > 0
+message("  level vs Paper 1's calibrated resource, median: ",
+        sprintf("%+.4f log10 (x%.3g)",
+                median((n_pp_ref - log10(params@dw_full))[ok_pp] -
+                       log10(params@initial_n_pp[ok_pp])),
+                10^median((n_pp_ref - log10(params@dw_full))[ok_pp] -
+                          log10(params@initial_n_pp[ok_pp]))))
+```
+###Setting up temperature-related information:
+-  Load ocean temp array
+```{r}
+# === Ocean temperature at reference conditions ===
+# Same logic as the resource: take the 1978-81 mean, not the series.
+ocean_temp_raw <- read.csv("Ess_Thermizer_data/Ocean_temp_by_Depth_1961_2100.csv", header = TRUE)
+rownames(ocean_temp_raw) <- as.character(ocean_temp_raw$year)
+ocean_temp_all <- as.matrix(ocean_temp_raw[, setdiff(names(ocean_temp_raw), "year")])
+stopifnot(all(as.character(reference_years) %in% rownames(ocean_temp_all)))
+
+temp_ref <- colMeans(ocean_temp_all[as.character(reference_years), , drop = FALSE])
+
+message("temperature reference: ",
+        paste(sprintf("%s %.2f C", names(temp_ref), temp_ref), collapse = ", "))
+
+# therMizer requires ocean_temp and n_pp_array as arrays indexed by year, so
+# build them over the reference period with every row identical. A steady state
+# only exists under constant-in-time inputs; these ARE the constant inputs.
+ocean_temp_1b <- matrix(rep(temp_ref, each = length(reference_years)),
+                        nrow = length(reference_years),
+                        dimnames = list(as.character(reference_years), names(temp_ref)))
+n_pp_array_1b <- matrix(rep(n_pp_ref, each = length(reference_years)),
+                        nrow = length(reference_years),
+                        dimnames = list(time = as.character(reference_years), w = sizes))
+
+# Both must be genuinely constant. Tested with length(unique()) not
+# diff(range()): size bins above the resource cutoff are legitimately -Inf
+# (initial_n_pp is zero there and the array holds log10 abundance; therMizer
+# computes 10^(n_pp_array)/dw_full so -Inf correctly encodes zero resource),
+# and diff(range()) on an all--Inf column returns NaN.
+const_cols <- function(x) all(apply(x, 2, function(v) length(unique(v)) == 1L))
+stopifnot(const_cols(ocean_temp_1b), const_cols(n_pp_array_1b))
+message("  resource bins non-finite (log10 = -Inf, i.e. zero resource): ",
+        sum(!is.finite(n_pp_ref)), " of ", length(n_pp_ref))
+
+# TWO WARNINGS FROM HERE ON ARE EXPECTED AND BENIGN.
+#
+# 1. "The dimnames of the second dimension of `n_pp_array` are not the same as
+#    the ones in `w_full` ... have been replaced by `w_full`" (once, from
+#    upgradeTherParams). This is a therMizer bug and cannot be satisfied:
+#    the check is identical(dimnames(n_pp_array)[[2]], params@w_full), which
+#    compares a CHARACTER dimnames vector against a NUMERIC one, so it is
+#    always FALSE whatever the names are set to. therMizer then assigns the
+#    correct names itself, and plankton_forcing() needs them numeric-parseable
+#    for the w_pp_cutoff test, which they are after the replacement.
+#
+# 2. "There is no `balance_plankton_forcing()` function, so the resource
+#    capacity could not be rebalanced" (once per matchBiomasses call, ~51
+#    times). therMizer supplies no balancing function for its resource
+#    dynamics, so mizer cannot rescale resource capacity alongside the fish.
+#    Harmless HERE because tuneSteadyState() holds the resource fixed at
+#    initial_n_pp and never calls the resource dynamics, so there is nothing
+#    to rebalance. It would matter if the resource were dynamic during
+#    calibration, which it is not.
+
+```
+
+
+
+# Load vertical migration and exposure arrays
+```{r}
+tmp_env <- new.env()
+load("Ess_Thermizer_data/GFDL_ESS_vertical_migration_array.Rdata", envir = tmp_env)
+vertical_migration_array <- tmp_env$vertical_migration_array
+exposure_array <- as.matrix(read.csv("Ess_Thermizer_data/GFDL_ESS_exposure_array.csv", row.names = 1, check.names = FALSE))
+
+```
+
+# Gaussian prey size-selectivity function for seals
+```{r}
+# Gaussian size-selectivity function (used by mizer internally)
+gaussian_sizeweight <- function(w, species_params, w_opt, sigma, ...) {
+  exp(-0.5 * ((log(w) - log(w_opt)) / sigma)^2)
+}
+```
+
+4. Run steady with constant temperature and productivity variabless. 
+```{r}
+params <- validParams(params)
+
+params_steady <- upgradeTherParams(params,
+                  ocean_temp = ocean_temp_1b,
+                  n_pp_array = n_pp_array_1b,
+                  vertical_migration_array = vertical_migration_array,
+                  exposure_array = exposure_array,
+                  aerobic_effect = TRUE,
+                  metabolism_effect = TRUE)
+
+# RESOURCE INITIALISED FROM THE FORCING. This is the deliberate choice that
+# was previously left open here, and it is only defensible now that 04's units
+# are right: the spectrum is an absolute COBALT-derived density rather than an
+# anomaly, so the forcing can set the resource level instead of inheriting it
+# from Paper 1.
+#
+# It matters because tuneSteadyState() holds the resource FIXED at
+# initial_n_pp and never calls the resource dynamics, so n_pp_array is
+# invisible to the calibration. Whatever is in initialNResource here IS the
+# resource the steady state is fitted against. Setting it from `params` (the
+# old line) meant the model was calibrated against Paper 1's resource while
+# the dynamic runs would then be forced by n_pp_array, a silent inconsistency.
+#
+# plankton_forcing() is therMizer's resource dynamics function, installed by
+# upgradeTherParams() above. It is called internally each timestep by mizer to
+# set n_pp from n_pp_array; calling it here, explicitly and with `t`, returns
+# the resource density at the reference state. Note it cannot be piped: it
+# takes `t` (no default) and returns a bare numeric vector, not a params
+# object, which is why the original piped form failed.
+initialNResource(params_steady) <- plankton_forcing(params_steady,
+                                                    t = min(reference_years))
+
+# the array is constant over the reference period, so the first and last
+# timesteps must agree, and the result must match the calibration grid
+stopifnot(all.equal(unname(plankton_forcing(params_steady, t = min(reference_years))),
+                    unname(plankton_forcing(params_steady, t = max(reference_years)))),
+          length(initialNResource(params_steady)) == length(params@w_full))
+message("resource initialised from the forcing; total ",
+        sprintf("%.4g", sum(initialNResource(params_steady) * params@dw_full)),
+        " vs Paper 1 ",
+        sprintf("%.4g", sum(initialNResource(params) * params@dw_full)))
+
+# Calibrate to steady state 
+for (i in 1:25) params_steady <- params_steady |> matchBiomasses() |>  tuneSteadyState()
+
+# Calibrate fishing mortality
+#
+# REWRITTEN. The previous form had two defects:
+#
+#   ratio <- plotYieldObservedVsModel(params_steady, return_data = TRUE)$ratio
+#   gear_params(params_steady)$catchability <-
+#     gear_params(params_steady)$catchability / ratio
+#
+#   (a) SEALS COUNTED AS CATCH. plotYieldObservedVsModel sums yield_observed
+#       over ALL gears, including Seals. Seals are a gear for convenience but
+#       are external predation, not landings. Worse, the Seals rows in the
+#       saved params carry SCRAMBLED yield_observed: 13 of 19 hold a DIFFERENT
+#       species' fishing yield (Sand Lance's Seals row holds Monkfish's
+#       bottom-trawl landings, Capelin's holds Halibut's fixed-gear landings).
+#       So 16 of 19 species were being calibrated toward a target that was a
+#       real landing plus someone else's landing. Capelin, Sand Lance and
+#       Longhorn Sculpin have zero fishing catchability and should have NO
+#       yield target at all; mizer says so itself once Seals are dropped.
+#
+#   (b) SILENT VECTOR RECYCLING. `ratio` is length 19 (one per species) and
+#       gear_params has 38 rows (species x gear). 38 is an exact multiple of
+#       19, so R recycled without warning and aligned ratio[i] with gear ROW i
+#       rather than with that row's species. Sand Lance ended up over-predicted
+#       2650-fold.
+#
+# Measured on the raw Stage-1 base, excluding Seals gives rho 1.000 and log10
+# RMSE 0.099 against rho 0.733 and RMSE 0.883 including them, so the apparent
+# poor yield fit was entirely this artifact.
+#
+# The corrected version: take the target from plotYieldExcl (Seals dropped from
+# a LOCAL copy only, the seal gear still acts in the model), match on SPECIES
+# rather than position, and adjust ONLY the fishing-gear catchabilities so the
+# seal predation parameterisation is left untouched.
+## ===========================================================================
+## therMizer-NATIVE RECALIBRATION
+##
+## Stage-1's rates cannot be carried over unchanged, for two compounding
+## reasons, and the result without this block is growth 47.5% fast with erepro
+## driven to its floor.
+##
+## 1. therMizer's thermal scalars are NORMALISED to [0,1] across each species'
+##    thermal range (0 at temp_min, 1 at temp_max), so BOTH effects only ever
+##    reduce the raw rates, and by very different amounts at the 1978-81
+##    reference state: metabolism to a median 0.303, encounter to 0.777. Stage-1
+##    was fitted with no scaling at all, so metabolism ends up 3.3x too cheap
+##    against intake only 1.3x too low.
+## 2. The corrected resource from 04 holds 4.5x more biomass than Stage-1's
+##    semi-chemostat resource, so the fish are over-fed on top of that.
+##
+## LEVER 1, ks, analytic. ks -> ks / metab_scalar restores EFFECTIVE metabolism
+## to Stage-1's exactly. ks is thereby reparameterised as the metabolic rate at
+## temp_max, which is what therMizer's normalisation implies it should be.
+##
+## LEVER 2, gamma, iterated against JUVENILE feeding level. Age at maturity is
+## set by growth below w_mat, and with effective metabolism restored, matching
+## juvenile feeding level reproduces Stage-1's juvenile growth. The
+## abundance-weighted mean over ALL sizes is NOT equivalent and fails badly:
+## for species whose juveniles eat plankton but whose adults eat fish the mean
+## sits on target while juveniles are over-fed. White Hake was the worst case,
+## juvenile f 0.924 against 0.606, maturing 43.8% too young.
+##
+## gamma is the right lever rather than h: h is physiological and allometrically
+## constrained, whereas mizer's convention is to DERIVE gamma from a target
+## feeding level, and Stage-1's realised feeding levels cluster at 0.600-0.605,
+## the signature of exactly that. A fish in a richer environment needs less
+## search volume for the same feeding level.
+##
+## ORDER AND DAMPING. matchYield changes catchability, hence F, hence abundance,
+## hence prey availability and feeding level. Each lever converges cleanly when
+## the other is held fixed, but full-strength alternation OSCILLATES (max growth
+## deviation observed swinging 6.0 -> 48.8 -> 12.7 -> 97.1%), and converging one
+## then the other merely trades the two errors. Damping BOTH with a square root
+## and alternating single steps finds the joint fixed point.
+## ===========================================================================
+## ---------------------------------------------------------------------------
+## FIX 1: RESOURCE ACCESSIBILITY.
+## The raw COBALT forcing leaves adult piscivores eating almost nothing else:
+## 97% resource for cod, 91% for monkfish, against Stage-1's 68% and 58%. Cod
+## at 97% plankton is not credible, and it disables the predation pathway that
+## carries the Paper 1 mechanism. Not all plankton is accessible to fish
+## (vertical and spatial mismatch, inedible fraction, patchiness), and
+## interaction_resource is mizer's per-species multiplier on resource
+## availability in encounter, unused at 1.
+##
+## Three independent lines put the accessible fraction near 0.15: the 4.47x
+## biomass excess over Paper 1's calibrated resource implies 0.22, Stage-1's
+## own diet fractions imply ~0.15, and a sweep with full recalibration at each
+## point showed 0.03 collapses the system while 0.1 gives slightly
+## better-than-Stage-1 diets.
+##
+## The two diet criteria pull in OPPOSITE directions, so this is a choice, not
+## an optimum (cod adult resource fraction | Cook & Bundy fish-prey mean |gap|):
+##     Stage-1       0.681 | 0.1461
+##     access 0.15   0.625 | 0.1586
+##     access 0.25   0.790 | 0.1471
+##     access 0.35   0.861 | 0.1410
+## 0.15 is chosen because it is the only value that brings the resource
+## fraction BELOW Stage-1. The Cook & Bundy cost is accepted: it measures
+## composition AMONG fish prey, conditional on eating fish at all, which is
+## secondary to whether a piscivore is piscivorous.
+ACCESSIBILITY <- 0.15
+species_params(params_steady)$interaction_resource <- ACCESSIBILITY
+
+## FIX 2: q-CORRECTION WHERE THE CATCH EXCEEDS THE SURVEYED BIOMASS.
+## Three species have Y/B above 1, i.e. the reported catch exceeds the
+## surveyed standing biomass, which cannot happen in a real stock. Since F is
+## pinned by Y/B, this forced implausible fishing mortality: biomass-weighted F
+## of 1.95/yr for Silver Hake in the Stage-1 base. Catchability CANNOT be
+## lowered to fix it, because matchYield pins catchability to reproduce the
+## observed yield; the biomass TARGET has to rise.
+##
+## The RV survey is a relative index with unknown catchability q, so a biomass
+## target below Y/F_plausible is a q signal. This is the same correction
+## ESS_size_structure_note.md applies to cod, but forced here by a hard
+## physical constraint rather than an assessment comparison. Retarget
+## biomass_observed to B = Y / F_TARGET for those species only.
+##
+## The implied q values are physically sensible, which is a useful check:
+## Atlantic Herring takes the largest correction (q = 0.11) and is the only
+## pelagic species in a bottom-trawl survey.
+F_TARGET  <- 0.5      # plausible exploited-stock fishing mortality, per year
+QFIX_RULE <- 1.0      # retarget any species whose Y/B exceeds this
+.Y  <- species_params(params_steady)$yield_observed
+.B  <- species_params(params_steady)$biomass_observed
+.YB <- .Y / .B
+.fix <- which(is.finite(.YB) & .YB > QFIX_RULE)
+for (.i in .fix)
+  message(sprintf("q-correction: %s Y/B %.2f, biomass_observed x%.2f, implied q %.2f",
+          species_params(params_steady)$species[.i], .YB[.i],
+          (.Y[.i] / F_TARGET) / .B[.i], F_TARGET / .YB[.i]))
+species_params(params_steady)$biomass_observed[.fix] <- .Y[.fix] / F_TARGET
+stopifnot(all(species_params(params_steady)$yield_observed[.fix] /
+              species_params(params_steady)$biomass_observed[.fix] - F_TARGET < 1e-9))
+## ---------------------------------------------------------------------------
+
+therMizerERG <- get("therMizerEReproAndGrowth", asNamespace("therMizer"))
+metab_fx <- function(p, t) {
+  z <- matrix(0, nrow(p@initial_n), ncol(p@initial_n))
+  -therMizerERG(p, t = t, encounter = z, feeding_level = z) / metab(p)
+}
+
+#metab_fx <- get("thermizer_metabolism_effect", asNamespace("therMizer"))
+
+f_juv <- function(p) {                       # feeding level below w_mat
+  fl <- getFeedingLevel(p); n <- p@initial_n; wm <- p@species_params$w_mat
+  vapply(seq_len(nrow(n)), function(i) {
+    k <- p@w < wm[i]; wt <- (n[i, ] * p@dw)[k]
+    if (sum(wt) <= 0) return(NA_real_)
+    sum(fl[i, k] * wt) / sum(wt)
+  }, 0)
+}
+amat <- function(p) {                        # age at maturity
+  g <- getGrowthCurves(p); ag <- as.numeric(dimnames(g)[[2]]); wm <- p@species_params$w_mat
+  vapply(seq_len(nrow(g)), function(i) { w <- g[i, ]
+    if (all(w < wm[i])) return(NA_real_)
+    approx(w, ag, xout = wm[i], ties = "ordered")$y }, 0)
+}
+settle <- function(p, n = 8) {
+  for (i in seq_len(n)) p <- suppressMessages(suppressWarnings(
+    p |> matchBiomasses() |> tuneSteadyState()))
+  suppressMessages(suppressWarnings(tuneSteadyState(p)))
+}
+yield_tbl <- function(p) {
+  y <- suppressMessages(plotYieldExcl(p, return_data = TRUE))   # Seals excluded
+  y[is.finite(y$observed) & y$observed > 0 & is.finite(y$model) & y$model > 0, ]
+}
+apply_catchability <- function(p, damp = TRUE) {
+  # take the target from plotYieldExcl (Seals dropped from a LOCAL copy only,
+  # the seal gear still acts in the model), match on SPECIES not position, and
+  # adjust ONLY the fishing-gear catchabilities.
+  y   <- yield_tbl(p)
+  gp  <- gear_params(p)
+  idx <- match(gp$species, y$species)
+  adj <- y$ratio[idx]
+  adj[is.na(adj) | !is.finite(adj) | adj <= 0] <- 1   # unfished / no target
+  adj[!gp$gear %in% fishing_gears] <- 1               # NEVER rescale the Seals gear
+  gp$catchability <- gp$catchability / (if (damp) sqrt(adj) else adj)
+  gear_params(p) <- gp
+  p
+}
+
+f_target <- f_juv(params)                    # Stage-1 base, pre-upgrade
+a_target <- amat(params)
+
+## ---- LEVER 1 --------------------------------------------------------------
+ms <- apply(metab_fx(params_steady, t = min(reference_years)), 1, median)
+species_params(params_steady)$ks <- params@species_params$ks / ms
+params_steady <- setMetabolicRate(params_steady)
+params_steady <- settle(params_steady)
+stopifnot(all(abs(rowMeans(
+  (params_steady@metab * metab_fx(params_steady, t = min(reference_years))) /
+   params@metab) - 1) < 1e-6))               # effective metabolism restored exactly
+message("lever 1: ks / metab_scalar, effective metabolism matched to Stage-1")
+
+## ---- LEVER 2, then the joint damped loop ----------------------------------
+## TARGET age_mat DIRECTLY, not Stage-1's juvenile feeding level.
+##
+## The feeding-level target was a proxy and it drifted. With effective
+## metabolism restored exactly and h untouched, matching Stage-1's juvenile
+## feeding level should reproduce Stage-1's juvenile growth. But f_juv is an
+## abundance-weighted MEAN over the juvenile range, whereas age at maturity
+## integrates 1/growth ACROSS that range, so it depends on the profile of f,
+## not its mean. The accessibility fix and the q-correction both reshaped that
+## profile, and the mean-matched target stopped implying the right growth:
+## deviation from age_mat went from 4.6% to 7.2%.
+##
+## More fundamentally, Stage-1 is not data. age_mat is an independent
+## observable already in species_params, so it is targeted directly and
+## Stage-1 is used only as a comparison. Growth responds monotonically to
+## gamma: maturing too young means too much food, so gamma comes down.
+A_TARGET <- species_params(params)$age_mat
+
+gamma_step <- function(p, gain = 1) {
+  r <- amat(p) / A_TARGET
+  r[!is.finite(r) | r <= 0] <- 1
+  species_params(p)$gamma <- species_params(p)$gamma * pmin(pmax(r^gain, 0.5), 2)
+  settle(setSearchVolume(p))
+}
+for (it in 1:15) {                           # converge gamma first, full gain
+  params_steady <- gamma_step(params_steady, gain = 1)
+  if (median(abs(100 * (amat(params_steady) - A_TARGET) / A_TARGET), na.rm = TRUE) < 1.5) break
+}
+for (k in 1:14) {                            # then joint, both damped
+  params_steady <- gamma_step(params_steady, gain = 0.5)
+  params_steady <- settle(apply_catchability(params_steady, damp = TRUE))
+}
+
+## Deviation is measured against the age_mat OBSERVABLE, not against Stage-1.
+pc <- 100 * (amat(params_steady) - A_TARGET) / A_TARGET
+yv <- yield_tbl(params_steady)
+message(sprintf("recalibrated: age at maturity vs age_mat, median %.2f%% max %.2f%%, %d of %d species reach w_mat",
+                median(abs(pc), na.rm = TRUE), max(abs(pc), na.rm = TRUE),
+                sum(!is.na(pc)), length(pc)))
+message(sprintf("  for comparison only, Stage-1 scores %.1f%% on the same target",
+                median(abs(100 * (amat(params) - A_TARGET) / A_TARGET), na.rm = TRUE)))
+message(sprintf("  yield rho %.4f RMSE(log10) %.5f on %d species, seals excluded",
+                cor(log10(yv$model), log10(yv$observed), method = "spearman"),
+                sqrt(mean(log10(yv$model / yv$observed)^2)), nrow(yv)))
+message("Steady-state residual: ", signif(max(abs(getSteadyResidual(params_steady))), 4))
+
+## biomass-weighted fishing mortality, Seals excluded. This is the quantity
+## the q-correction targets; peak F across the whole w grid is NOT a useful
+## check because the selectivity keeps rising past w_max, so it reports a
+## "peak" at sizes the species never reaches (Silver Hake peaked at 62.7 kg
+## against a w_max of 1.6 kg).
+.gq <- params_steady
+gear_params(.gq) <- gear_params(params_steady)[
+  !gear_params(params_steady)$gear %in% "Seals", ]
+.fm <- getFMort(.gq)
+.bm <- sweep(params_steady@initial_n, 2, params_steady@w * params_steady@dw, "*")
+Fbar <- vapply(seq_len(nrow(.fm)), function(i) sum(.fm[i, ] * .bm[i, ]) / sum(.bm[i, ]), 0)
+message(sprintf("fishing mortality: max biomass-weighted F %.3f (%s); species with F > 1: %d",
+        max(Fbar), params_steady@species_params$species[which.max(Fbar)], sum(Fbar > 1)))
+
+.rd <- getDiet(params_steady)
+.ri <- which(dimnames(.rd)[[3]] == "Resource")
+.tot <- apply(.rd, c(1, 2), sum)
+.rfrac <- ifelse(.tot > 0, .rd[, , .ri] / .tot, NA)
+.cod <- which(params_steady@species_params$species == "Atlantic Cod")
+.cod_res <- mean(.rfrac[.cod, params_steady@w >
+                   params_steady@species_params$w_mat[.cod]], na.rm = TRUE)
+message(sprintf("adult cod diet, resource fraction %.3f (Stage-1 0.681, raw forcing 0.971)", .cod_res))
+
+## All thresholds are against OBSERVATIONS, not against Stage-1.
+stopifnot(median(abs(pc), na.rm = TRUE) < 1,     # age at maturity vs age_mat
+          max(abs(pc), na.rm = TRUE) < 3,
+          !anyNA(pc),                            # every species must reach w_mat
+          sqrt(mean(log10(yv$model / yv$observed)^2)) < 0.01,   # yield_observed
+          max(abs(getSteadyResidual(params_steady))) < 1e-4,
+          all(Fbar < 1),                         # Y/B cannot exceed plausible F
+          .cod_res < 0.70,                       # Cook & Bundy puts cod at 0.528
+          all(rowSums(sweep(params_steady@initial_n, 2,
+                            params_steady@w * params_steady@dw, "*")) > 1e-10))
+saveRDS(params_steady, "Ess_Thermizer_data/params_thermizer_steady.rds")
+```
+
+---
+
+## REMOVED: the three variable-climate "steady" runs
+
+This script previously continued with three further calibrations, each passing
+the TIME-VARYING `ocean_temp` and `n_pp_array` to `upgradeTherParams()` and then
+iterating `tuneSteadyState()`:
+
+- Run 1, aerobic effect alone  (`aerobic_effect = TRUE,  metabolism_effect = FALSE`)
+- Run 2, metabolic effect alone (`aerobic_effect = FALSE, metabolism_effect = TRUE`)
+- Run 3, combined              (both `TRUE`)
+
+They have been deleted because **a steady state under time-varying forcing does
+not exist**. The forcing moves every year, so there is no fixed point to find
+and the solver cannot converge. Measured on the 1961-2024 forcing:
+
+| run | forcing | non-convergence warnings |
+|---|---|---|
+| baseline (this script) | `ocean_temp_1b`, `n_pp_array_1b`, constant at the 1978-81 mean | **0** |
+| aerobic only | time-varying | 26 |
+| metabolic only | time-varying | 26 |
+| combined | time-varying | 26 |
+
+78 failures, all of them in the time-varying runs, with biomasses still changing
+at up to 0.9 per year while the distance function reported convergence. The
+baseline converges cleanly. This was masked for two of the three runs because
+they used `steady()`, which passes `require_steady = FALSE` and so returns a
+non-converged state without warning.
+
+Steady-state calibration therefore requires constant-in-time inputs, which is
+what the baseline above uses. The aerobic / metabolic / combined decomposition
+is a question about DYNAMICS and belongs in the dynamical-runs script, where
+time-varying forcing is appropriate and `project()` is used rather than
+`tuneSteadyState()`. Templates: `ESS_Restructured/03_Scenarios_Through_time.Rmd`
+and `04_Indicators.Rmd`.
+
+The scope of THIS script is: recalibrate the Stage-1 base to a steady state with
+therMizer active at reference-constant climate, so that the thermal scaling is
+absorbed into the fitted rates rather than appearing as a constant offset. It
+ends with `params_steady`.
+
+
+
+# Steady-state diagnostics
+```{r}
+
+# Run the model to steady state and return the full simulation object
+# - return_sim = TRUE: keeps the time series data (vs. just returning final params)
+# - t_max = 100: allows up to 100 time steps to reach convergence
+sim <- projectToSteady(params_steady, return_sim = TRUE, t_max = 100)
+# Quick plot of total biomass and yields over time (main summary)
+plot(sim)
+
+# Check Diagnostic plots
+# Plot species biomass over time
+# Useful to check if species stabilize or fluctuate at steady state
+plotBiomass(sim)
+
+# Plot spectra (biomass by size) from the final state
+# Reveals trophic structure and size-based energy flow
+plotSpectra(sim)
+
+# Plot species diet composition by size
+# Shows who eats whom across size classes  (Supplementary Fig S8)
+diet_at_size <- plotDiet(params_steady)
+diet_at_size
+
+# Plot growth curves for each species
+# - species_panel = TRUE: shows separate panels per species
+# - max_age = 20: restricts plots to ages up to 20
+plotGrowthCurves(params_steady, species_panel = TRUE, max_age = 20)
+
+# Compare model vs observed yield (catch) — seals excluded from model yield
+# - ratio = TRUE: visualizes model/observed ratio; ideal = 1
+plotYieldExcl(params_steady, ratio = TRUE)
+
+# Compare model vs observed biomass
+# - ratio = TRUE: visualizes model/observed ratio; ideal = 1
+plotBiomassObservedVsModel(params_steady, ratio = TRUE)
+
+# Plot feeding level by size
+# Reveals how full each species is at each size (0 = starving, 1 = satiated)
+plotFeedingLevel(params_steady)
+```
+
+
+Nine summary pages for the calibrated steady state, written as ONE combined
+multi-page PDF to `save_dir`. These reproduce the set in
+`05_steady_diagnostics.pdf`, with two deliberate departures, both flagged on
+the figures: the Seals gear is excluded from the fishing-mortality panel
+because Seals are external predation rather than landings, and growth is
+judged against the `age_mat` observable rather than against Stage-1.
+
+```{r steady-diagnostics, fig.show='hide'}
+# The diagnostics live in their own script so they can be regenerated in
+# seconds against the saved params, without re-running the 2.5 minute
+# recalibration above. 05 still produces them on a full run.
+source(file.path(here(), "Ess_Thermizer_data/make_05_diagnostics.R"))
+```
