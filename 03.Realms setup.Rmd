@@ -1,0 +1,160 @@
+---
+title: "Realms set-up"
+author: "Ezekiel Adekoya"
+date: "2024-11-12"
+output: Temp Realms
+---
+Workflow details
+
+This workflow prepares ISIMIP 3b temperature data for use in therMizer. It involves processing temperature data (ocean_temp_array) and generating vertical_migration_array and exposure_array required by therMizer.
+
+TherMizer Formatting: The R script Prep_TempRealms_therMizer.Rmd merged WOA and ISIMIP data, setting the WOA average as a baseline. Differences were calculated and concatenated into GFDL_ocean_temp_realm_array.dat.
+Creating vertical_migration and exposure Arrays: These arrays were generated using SetUp_Realms.Rmd.
+Output Files
+ESS_vertical_migration_array.Rdata
+ESS_exposure_array.csv
+These files are the final inputs for therMizer.
+
+Set up directories
+```{r setup, include=TRUE}
+library("here")
+dir <- setwd(here())
+knitr::opts_knit$set(root.dir = "~/Mac/Dropbox/Desktop/Fishmip_ESS/")
+knitr::opts_knit$set(root.dir = dir)
+
+# Define the save directory
+  save_dir <- paste0(here(), "Ess_Fishmip_data/")
+```
+
+```{r}
+library(mizer)
+#Load parameters
+# Stage 1, NOT Stage 2: Stage 2 (cultivation) is not forward-stable, and the
+# realm arrays must be built on the same object 04 and 05 use. The two in-repo
+# Stage-1 copies are identical to machine precision; this one is already saved
+# under mizer 3.4.0 so it loads without an upgrade warning.
+#params<-readRDS("Ess_Thermizer_data/params_stage2_factual.RDS")
+#params<-readRDS("Ess_Thermizer_data/params_stage2_AUTO.RDS")
+params<-readRDS("Ess_Fishmip_data/params_stage1_steady.RDS")
+species_names <- as.character(species_params(params)$species)
+sizes <- params@w
+length(sizes)
+```
+
+
+
+```{r}
+library(mizer)
+#Load parameters
+#params<-readRDS("Ess_Thermizer_data/params_with_seal_interaction.RDS")
+#params<-readRDS("Ess_Thermizer_data/sims_scen2.RDS")
+species_names <- as.character(species_params(params)$species)
+sizes <- params@w
+#dim(sizes)
+```
+
+# Create the vertical migration array and fill it
+```{r}
+
+# ============================================================
+# REALMS = depth strata of the water column.
+#
+# `vertical_migration_array[realm, species, size]` is the PROPORTION OF TIME a
+# species spends in each stratum, and it MUST SUM TO 1 across realms for each
+# species. therMizer evaluates the thermal performance curve separately at each
+# stratum's temperature, then weights by this array and SUMS over realms
+# (`colSums` in therMizer:::scaled_temp_effect). Weights that do not sum to 1
+# therefore multiply the thermal effect rather than apportioning it.
+#
+# TWO realms, matching the forcing. `Ocean_temp_by_Depth_1961_2100.csv` has
+# columns `r0to50` and `r50to150`, and therMizer matches ocean_temp columns to
+# realms BY POSITION, not by name, so the count and order must agree.
+#
+# The 18-realm vector below is the Hawaii longline therMizer scheme
+# (Woodworth-Jefcoats; see Ortega-Cisneros et al. 2025, Earth's Future 13(2)
+# e2024EF004826, where that model uses 18 depth ranges keyed to species'
+# preferred depths). Retained for reference only. A previous version of this
+# script used a 3-realm binary scheme that did not match the forcing and did
+# not sum to 1; the weights below are recovered verbatim from the committed
+# GFDL_ESS_vertical_migration_array.Rdata.
+# ============================================================
+
+#realm_names <- c("r0to20", "r0to50", "r0to85", "r0to100", "r0to150", "r0to200",  "r0to1200", "r50to150", "r50to200", "r50to300", "r100to200", "r100to250", "r100to400", "r150to600", "r200to400", "r200to980", "r250to500", "r400to1200")
+realm_names <- c("r0to50", "r50to150")
+species_names <- as.character(species_params(params)$species)
+sizes <- params@w
+
+# Time-at-temperature weights, one row per species, summing to 1 across realms.
+vm_weights <- rbind(
+  "Atlantic Cod"          = c(r0to50 = 0.2, r50to150 = 0.8),
+  "Haddock"               = c(r0to50 = 0.2, r50to150 = 0.8),
+  "White Hake"            = c(r0to50 = 0.2, r50to150 = 0.8),
+  "Red Hake"              = c(r0to50 = 0.2, r50to150 = 0.8),
+  "Silver Hake"           = c(r0to50 = 0.2, r50to150 = 0.8),
+  "Pollock"               = c(r0to50 = 0.2, r50to150 = 0.8),
+  "Redfish Unseparated"   = c(r0to50 = 0.0, r50to150 = 1.0),
+  "American Plaice"       = c(r0to50 = 0.0, r50to150 = 1.0),
+  "Yellowtail Flounder"   = c(r0to50 = 0.0, r50to150 = 1.0),
+  "Witch Flounder"        = c(r0to50 = 0.0, r50to150 = 1.0),
+  "Atlantic Herring"      = c(r0to50 = 1.0, r50to150 = 0.0),
+  "Capelin"               = c(r0to50 = 1.0, r50to150 = 0.0),
+  "Thorny Skate"          = c(r0to50 = 0.0, r50to150 = 1.0),
+  "Winter Skate"          = c(r0to50 = 0.0, r50to150 = 1.0),
+  "Spiny Dogfish"         = c(r0to50 = 0.2, r50to150 = 0.8),
+  "Monkfish"              = c(r0to50 = 0.0, r50to150 = 1.0),
+  "Sand Lance"            = c(r0to50 = 0.9, r50to150 = 0.1), ## they rarely go beyond 100meters
+  "Longhorn Sculpin"      = c(r0to50 = 0.2, r50to150 = 0.8),
+  "Atlantic Halibut"      = c(r0to50 = 0.2, r50to150 = 0.8)
+)
+
+# Every model species must have weights, and every row must sum to 1.
+stopifnot(setequal(rownames(vm_weights), species_names))
+stopifnot(identical(colnames(vm_weights), realm_names))
+stopifnot(all(abs(rowSums(vm_weights) - 1) < 1e-9))
+
+# Create the vertical migration array and fill it. Weights are size-constant,
+# which is what the committed array holds; make them size-varying here if a
+# species' depth use is ever resolved by body size.
+vertical_migration_array <- array(0, dim = (c(length(realm_names), length(species_names), length(sizes))), dimnames = list(realm = realm_names, sp = species_names, w = signif(sizes,3))) # realm x species x size
+
+for (s in species_names) {
+  for (r in realm_names) {
+    vertical_migration_array[r, s, ] <- vm_weights[s, r]
+  }
+}
+
+# Guard: the thermal effect is apportioned, not multiplied.
+stopifnot(all(abs(apply(vertical_migration_array, c(2, 3), sum) - 1) < 1e-9))
+
+```
+
+
+# Construct exposure array
+```{r}
+exposure_array <- array(0, dim = (c(length(realm_names), length(species_names))), 
+                        dimnames = list(realm = realm_names, sp = species_names)) # realm x species
+
+for (r in seq(1,length(realm_names),1)) {
+  for (s in seq(1,length(species_names),1)) {
+    if (any(vertical_migration_array[r,s,] > 0)) {
+      exposure_array[r,s] = 1
+    }
+  }
+}
+dimnames(exposure_array)
+```
+
+
+```{r}
+save(vertical_migration_array, file = "Ess_Fishmip_data/GFDL_ESS_vertical_migration_array.Rdata")
+write.csv(exposure_array, file = "Ess_Fishmip_data/GFDL_ESS_exposure_array.csv",row.names = TRUE)
+exposure_array <- as.matrix(read.csv("Ess_Fishmip_data/GFDL_ESS_exposure_array.csv",row.names = 1, check.names = FALSE))
+
+```
+
+
+
+```{r}
+
+```
+

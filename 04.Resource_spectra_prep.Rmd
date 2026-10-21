@@ -1,0 +1,347 @@
+---
+title: "Prep_Plankton_therMizer."
+author: "Edited by Ezekiel from Phoebe.Woodworth-Jefcoats@noaa.gov"
+date: '2025-09-23'
+output: html_document
+---
+
+## Prep plankton forcing for input into therMizer
+  
+#This script uses the files output by Plankton_ts.jnl (for use with [PyFerret](https://ferret.pmel.noaa.gov/Ferret/)) to create the background resource array that will be used by therMizer.  In that script, plankton carbon densities were converted to total carbon and summed over the model domain.  This is similar to, but an improvement upon, [Woodworth-Jefcoats et al. 2019](https://www.frontiersin.org/articles/10.3389/fmars.2019.00383/full).  Here, this total carbon is used to create resource spectra at each time step.
+
+#Notes::  Size class ranges, for reference (ESD = Equivalent Spherical Diameter):  
+# - Phyto = 0.2 - 200 um ESD (mid-point size = 100.1 um ESD)  
+# -	pico = 0.2 - 10 um ESD (mid-point size = 5.1 um ESD)  
+# -	large (diatoms and diazotrophs) = 10 - 200 um ESD (mid-point size = 105 um ESD)  
+# - Zoo = 2 - 20,00 um ESD (based on the literature)(mid-point size = 10001 um ESD)  
+# -	zmicro = 2 - 200 um ESD (mid-point size = 101 um ESD)  
+# -	zmeso = 200 - 20000 um ESD (mid-point size = 10100 um ESD)  
+# 
+# These size classes were informed by Dunne et al. [2005](https://doi.org/10.1029/2004GB002390), [2012](https://doi.org/10.1029/2010GB003935), and [2013](https://doi.org/10.1175/JCLI-D-12-00150.1), [Liu et al. 2021](https://doi.org/10.1029/2021GL094367), and [Stock et al. 2020](https://doi.org/10.1029/2019MS002043).
+# 
+# Conversions used:  
+#   - Convert g C to gww --> $\times 10$  
+#   - Convert um ESD to gww --> $\frac{4}{3}\pi(0.5\times0.0001\times size)^3$
+
+Set up directories
+```{r setup, include=TRUE}
+library("here")
+dir <- setwd(here())
+knitr::opts_knit$set(root.dir = "~/Mac/Dropbox/Desktop/Fishmip_ESS/")
+knitr::opts_knit$set(root.dir = dir)
+
+# Define the save directory
+  save_dir <- paste0(here(), "Ess_Fishmip_data/")
+
+```
+
+Cliamte Data from FISHMIP Observation-based climate related forcing (obsclim) outputs from the GFDL-MOM6-COBALT2 model.
+```{r}
+
+SPECTRA_START <- "1961-01-01"
+SPECTRA_END   <- "2010-12-31"
+
+read_plankton <- function(v) {
+  read.csv(file.path("Ess_Fishmip_data", paste0("GFDL_obsclim_", v, "_1961_2010.csv"))) %>%
+    mutate(V1 = as.Date(V1, format = "%Y-%m-%d")) %>%
+    filter(V1 >= as.Date(SPECTRA_START) & V1 <= as.Date(SPECTRA_END))
+}
+
+GFDL_diat   <- read_plankton("diat")
+GFDL_diaz   <- read_plankton("diaz")
+GFDL_zmicro <- read_plankton("micro")
+GFDL_zmeso  <- read_plankton("meso")
+GFDL_pico   <- read_plankton("pico")
+
+# Guard against the length/misalignment problem from before
+stopifnot(
+  all(sapply(list(GFDL_diaz, GFDL_zmicro, GFDL_zmeso, GFDL_pico),
+             function(d) identical(d$V1, GFDL_diat$V1)))
+)
+
+
+# ---------------------------------------------------------------------------
+# PLANKTON SIZE CLASSES: COBALTv2 as implemented in GFDL-ESM4.1
+# Stock et al. (2020) J. Adv. Model. Earth Syst. 12, e2019MS002043,
+# "Ocean Biogeochemistry in GFDL's Earth System Model 4.1 and Its Response to
+# Increasing Atmospheric CO2", doi:10.1029/2019MS002043:
+#   SP  (pico)   below the ~10 um ESD delineation between SP and LP
+#   LP  (large)  above it; diatoms are a diagnosed fraction of LP and
+#                diazotrophs are a separate Trichodesmium-like group, so the
+#                two files are summed into one large-phytoplankton class
+#   SZ  (zmicro) "< 200 um ESD (i.e. microzooplankton)"
+#   MZ + LZ      "~200-2,000 um ESD" and "> 2,000 um ESD (e.g. large copepods
+#                and krill)". The ISIMIP variable is "Mesozooplankton/Large
+#                Zoo Carbon Concentration", i.e. MZ and LZ combined, so the
+#                class runs from 200 um to the 20 mm mesozooplankton limit.
+esd_lo <- c(pico = 0.2, large = 10,  zmicro = 2,   zmeso = 200)
+esd_hi <- c(pico = 10,  large = 200, zmicro = 200, zmeso = 20000)
+
+# um ESD -> g wet weight, as a sphere of unit density
+esd_to_gww <- function(d) (4/3) * pi * ((0.5 * 0.0001 * d)^3)
+
+# Class BOUNDS in g wet weight. No representative size is needed: the spectrum
+# is built by integrating over each class (see below), which is what removes
+# the arithmetic-vs-geometric mid-point question entirely. For reference, the
+# arithmetic mid-point of zmeso is 10100 um = 0.54 g, a half-gram
+# "mesozooplankton", against 2000 um = 4.2 mg for the geometric mean.
+w_lo <- esd_to_gww(esd_lo)
+w_hi <- esd_to_gww(esd_hi)
+
+# CARBON TO WET WEIGHT, per group.
+#
+# 01.Plankton_prep.Rmd already converted mol C m-2 to g wet weight region
+# totals, as `annual_mean$val * 12.011 * 10 * region_area_m2`, so the files
+# read above are ALREADY wet weight. Applying another x10 here, as this script
+# used to, was a second carbon-to-wet-weight conversion and overstated every
+# group tenfold. Carbon is recovered by dividing out that uniform 10 and the
+# group-specific factor applied instead.
+#
+# 01 flags the problem itself: its x10 "was set for phytoplankton (Diat/Diaz/
+# Pico). Confirm whether Zmeso/Zmicro need a different conversion factor".
+#
+# Phytoplankton, from Menden-Deuer & Lessard (2000) Limnol. Oceanogr. 45(3):
+# 569-579, "Carbon to volume relationships for dinoflagellates, diatoms, and
+# other protist plankton", doi:10.4319/lo.2000.45.3.0569. A cell of volume V
+# um^3 at unit density weighs V pg wet, so their pgC-per-cell relations give
+# the carbon fraction of wet weight directly, and it FALLS with cell size:
+#   other protist plankton  pgC = 0.216 V^0.939  -> at pico (1.41 um ESD,
+#                           V = 1.47 um^3)  C/wet = 0.211, wet = 4.74 x C
+#   diatoms                 pgC = 0.288 V^0.811  -> at large (44.7 um ESD,
+#                           V = 4.68e4 um^3) C/wet = 0.038, wet = 26.5 x C
+# Large diatoms are heavily vacuolated and so carbon-poor per unit volume,
+# which is why the factor is so much larger than for picoplankton.
+#
+# Zooplankton: crustacean zooplankton are ~80% water (dry/wet ~0.20) and
+# carbon is ~40-50% of dry weight in copepods, giving C/wet ~0.072-0.11 and
+# wet = 9-14 x C. The uniform 10 is well supported here and is kept.
+c_to_wet <- c(pico = 4.74, large = 26.5, zmicro = 10, zmeso = 10)
+
+# Wet biomass by class and time step, large = diatoms + diazotrophs.
+# The /10 undoes 01's uniform factor; c_to_wet re-applies the right one.
+plankton_wet <- cbind(pico   = GFDL_pico[, 2],
+                      large  = GFDL_diat[, 2] + GFDL_diaz[, 2],
+                      zmicro = GFDL_zmicro[, 2],
+                      zmeso  = GFDL_zmeso[, 2])[, names(esd_lo)]
+plankton_wet <- sweep(plankton_wet / 10, 2, c_to_wet, "*")
+
+# The full spectrum sizes were generated by setting up a mizer params:
+
+# Stage 1, to match 03 and 05. This MATTERS here: the resource spectrum is
+# written on this object's w_full grid, so the base params determines the
+# number of columns in GFDL_resource_spectra_*.dat.
+#   Stage 1 / stage2_AUTO : w_full = 211  (w max 110 kg)
+#   stage2_factual        : w_full = 197  (w max 1624 kg)
+# The committed .dat has 197 columns, i.e. it was built on stage2_factual.
+# Re-running this chunk on Stage 1 therefore CHANGES the output width to 211,
+# and 05 must be re-run against the regenerated file. Line 83 of 05 indexes
+# the spectra against params@initial_n_pp, so a mismatch is a hard error.
+#params <- readRDS("Ess_Thermizer_data/params_stage2_factual.RDS")
+params <- readRDS("Ess_Fishmip_data/params_stage1_steady.RDS")
+
+# and accessing the full size range
+full_x <- log10(params@w_full)
+length(full_x)
+```
+ 
+Plankton spectra, slope and intercept
+```{r}
+full_x <- log10(params@w_full)
+length(full_x)
+time_step <- GFDL_zmeso$V1
+# Creating background resource for full_x, using the actual slope and intercept from the linear models.
+isimip_slope <- array(numeric(), c(length(time_step), 1))
+isimip_intercept <- array(numeric(), c(length(time_step), 1))
+out_isimip <- array(numeric(), c(length(time_step), length(full_x)))
+
+# CONSTRUCTED BY INTEGRATION OVER EACH CLASS, not by regression through class
+# mid-points. Each group's wet biomass B_i is spread over its own size range as
+# n_i(w) = c_i w^b, with c_i fixed by requiring that the biomass integrate to
+# B_i exactly:
+#
+#     integral_{lo_i}^{hi_i} c_i w^b . w dw = B_i
+#
+# The total resource density is then the SUM over groups, n(w) = sum_i n_i(w).
+# Three things follow, all of which the previous four-point regression got
+# wrong:
+#
+#   1. No representative size is needed at all, so the arithmetic-vs-geometric
+#      mid-point question disappears rather than being answered.
+#   2. The classes OVERLAP (zmicro spans 2-200 um, crossing both pico 0.2-10
+#      and large 10-200), and overlapping taxa are summed, as they physically
+#      must be. The regression instead treated them as independent points at
+#      nearly the same size, which just doubled the weight there: micro at 101
+#      um and large at 105 um sat 0.051 log10 apart, so the four-point fit was
+#      really three points with one counted twice.
+#   3. Biomass is CONSERVED per group, to machine precision. The regression
+#      conserved nothing, which is why its apparent agreement with the
+#      calibrated resource level was not meaningful.
+#
+# The only free parameter is the within-class exponent b, and it is determined
+# SELF-CONSISTENTLY: build the spectrum, fit its aggregate slope, feed that
+# back in as b, repeat. It converges in about five passes to b = -1.988.
+amplitude <- function(B, lo, hi, b) {
+  if (abs(b + 2) < 1e-9) B / log(hi / lo)        # b = -2 is the singular case
+  else B * (b + 2) / (hi^(b + 2) - lo^(b + 2))
+}
+## EXTENDED ABOVE THE MESOZOOPLANKTON LIMIT. Above max(w_hi) = 4.19 g (20 mm
+## ESD) no COBALT group contributes, so a plankton-only resource is zero there.
+## That is physically correct for plankton and wrong for the model, because
+## mizer's semi-chemostat resource was never only plankton: in Stage-1 the fish
+## drew 79-99% of their diet from "resource" at EVERY size, including 10-100 kg,
+## and that resource ran to 90 g. It was implicitly standing in for all
+## unmodelled prey, benthic invertebrates and small non-modelled fish, which is
+## what large piscivores on a shelf actually eat. A 10 kg predator with
+## beta ~ 100 prefers ~100 g prey, so this band is its closest available food.
+##
+## Measured directly: capping Stage-1's resource at 4.19 g and changing nothing
+## else halves biomass above 10 kg (x0.558), with Atlantic Cod worst at x0.130.
+##
+## So the fitted power law is continued above the mesozooplankton limit at the
+## same slope, which is what this script effectively did before the per-class
+## rewrite. plankton_forcing() then applies w_pp_cutoff, stopping it at 100 g
+## and reproducing Stage-1's resource extent.
+##
+## NOTE this deliberately breaks strict biomass conservation against the ESM
+## above 4.19 g: the extension represents prey COBALT does not report, so there
+## is no ESM biomass to conserve. Conservation still holds exactly within each
+## nominal class (checked below). The extension inherits the plankton
+## spectrum's year-to-year variation, i.e. it assumes unmodelled prey scale
+## with plankton production rather than being held constant.
+build_spectrum <- function(B, b) {
+  ci   <- amplitude(B, w_lo, w_hi, b)
+  top  <- max(w_hi)
+  dens <- vapply(params@w_full,
+                 function(w) sum(ci * w^b * (w >= w_lo & w <= w_hi)), numeric(1))
+  above <- params@w_full > top
+  if (any(above)) {
+    dens_top <- sum(ci * top^b * (top >= w_lo & top <= w_hi))
+    dens[above] <- dens_top * (params@w_full[above] / top)^b
+  }
+  dens
+}
+fit_slope <- function(dens) {
+  k <- dens > 0
+  unname(coef(lm(log10(dens[k]) ~ log10(params@w_full[k])))[2])
+}
+isimip_b <- array(numeric(), c(length(time_step), 1))
+
+for (t in seq(1, length(time_step), 1)) {
+  B <- plankton_wet[t, ]
+
+  b <- -2
+  for (iter in 1:50) {
+    b_new <- fit_slope(build_spectrum(B, b))
+    if (abs(b_new - b) < 1e-6) { b <- b_new; break }
+    b <- b_new
+  }
+  dens <- build_spectrum(B, b)
+
+  # therMizer::plankton_forcing() computes 10^(n_pp_array[t, ]) / dw_full, so
+  # the array holds log10(numbers per BIN): convert the density to a per-bin
+  # count by multiplying by dw_full. Bins outside every class are genuinely
+  # zero, hence -Inf here, which plankton_forcing turns back into 0. That
+  # includes the 55 bins above 4.19 g, the largest mesozooplankton: mizer's
+  # semi-chemostat resource carried abundance up to 90 g, which is not a
+  # physical plankton size.
+  #
+  # NO SLOPE OR INTERCEPT SCALING. The previous version applied x1.03 to the
+  # slope and x0.85 to the intercept, citing Woodworth-Jefcoats et al. (2019)
+  # doi:10.3389/fmars.2019.00383. That paper uses CMIP5 plankton densities
+  # rather than COBALT and reports x1.2 / x0.8, and its factors were obtained
+  # by comparing "the above described plankton spectra with the background
+  # spectrum generated by the semi-chemostat resource model to determine
+  # appropriate scaling", i.e. they are tuned to force the ESM spectrum onto
+  # mizer's calibrated resource. Here they were compensating for the unit
+  # errors: the intercept mean was +13.5, so x0.85 cut the level by 2.03 log10
+  # (a factor of 0.0094) while x1.03 could not touch a slope that was wrong by
+  # a factor of two. No scaling is applied now.
+  out_isimip[t, ] <- log10(dens * params@dw_full)
+
+  # Diagnostics: the aggregate slope and its intercept, plus the within-class
+  # exponent. Slope is no longer a fitted input, it is a property of the result.
+  isimip_b[t, 1] <- b
+  isimip_slope[t, 1] <- fit_slope(dens)
+  k <- dens > 0
+  isimip_intercept[t, 1] <- unname(coef(lm(log10(dens[k]) ~ log10(params@w_full[k])))[1])
+}
+
+# Save. The S1.03I0.85 suffix on the previous files encoded the slope and
+# intercept scalings, which no longer exist, so the names drop it. The old
+# files are left in place for comparison; 05 reads the new ones.
+rownames(out_isimip) <- format(time_step, "%Y")
+colnames(out_isimip) <- names(params@initial_n_pp)   # size bins, so 05 can check
+write.table(out_isimip, file = "Ess_Fishmip_data/GFDL_resource_spectra.dat", quote = FALSE, row.names = TRUE, col.names = TRUE)
+write.table(isimip_slope, file = "Ess_Fishmip_data/GFDL_resource_slope.dat", quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+write.table(isimip_intercept, file = "Ess_Fishmip_data/GFDL_resource_intercept.dat", quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+```
+
+The spectrum is now an absolute, biomass-conserving resource density derived
+from COBALT carbon, so it can be compared against the resource `mizer` arrived
+at independently by calibration in Paper 1. The two are NOT expected to agree
+on level: `mizer`'s semi-chemostat resource is an abstraction whose capacity
+was tuned to balance the fish community, not a prediction of standing stock.
+The slope comparison is the informative one, and the biomass ratio is reported
+because it is the quantity that needs no assumption about size distribution.
+
+```{r}
+# Verification. plankton_forcing() reads 10^(n_pp_array)/dw_full, so recover
+# the density the model will actually see.
+ok   <- params@initial_n_pp > 0
+ref  <- log10(params@initial_n_pp[ok])
+dens_ref <- 10^out_isimip[1, ] / params@dw_full
+both <- ok & dens_ref > 0
+
+cat(sprintf("within-class exponent b   %+0.4f  (mean %+0.4f)\n",
+            isimip_b[1, 1], mean(isimip_b)))
+cat(sprintf("aggregate slope           %+0.4f  (mean over %d steps %+0.4f)\n",
+            isimip_slope[1, 1], nrow(isimip_slope), mean(isimip_slope)))
+cat(sprintf("calibrated slope          %+0.4f\n",
+            coef(lm(ref ~ log10(params@w_full[ok])))[2]))
+cat(sprintf("level vs calibrated       x%.3g  (median over %d shared bins)\n",
+            10^median(log10(dens_ref[both]) - log10(params@initial_n_pp[both])),
+            sum(both)))
+
+# Biomass conservation, per group, and the overall biomass comparison.
+B_ref <- plankton_wet[1, ]
+ci    <- amplitude(B_ref, w_lo, w_hi, isimip_b[1, 1])
+err   <- vapply(seq_along(ci), function(i)
+  integrate(function(w) ci[i] * w^(isimip_b[1, 1] + 1),
+            w_lo[i], w_hi[i], rel.tol = 1e-10)$value / B_ref[i] - 1, numeric(1))
+cat(sprintf("biomass conserved per group, max |rel err|  %.2e\n", max(abs(err))))
+
+w <- params@w_full
+in_range <- w <= max(w_hi)
+cat(sprintf("ESM plankton wet biomass          %.4g g\n", sum(B_ref)))
+cat(sprintf("mizer resource, w <= %.3g g       %.4g g\n", max(w_hi),
+            sum((params@initial_n_pp * w * params@dw_full)[in_range])))
+cat(sprintf("ratio over the overlapping range  %.2f\n",
+            sum(B_ref) / sum((params@initial_n_pp * w * params@dw_full)[in_range])))
+
+# the extrapolated band above the mesozooplankton limit, standing in for
+# unmodelled prey. plankton_forcing() caps it at w_pp_cutoff.
+cut_off <- params@resource_params$w_pp_cutoff
+ext <- w > max(w_hi) & w < cut_off
+cat(sprintf("extrapolated band %.3g to %.3g g  %.4g g (%.1f%% on top of the ESM biomass)\n",
+            max(w_hi), cut_off, sum((dens_ref * w * params@dw_full)[ext]),
+            100 * sum((dens_ref * w * params@dw_full)[ext]) / sum(B_ref)))
+cat(sprintf("  for comparison, Stage-1 held    %.4g g in 4.19-90 g\n",
+            sum((params@initial_n_pp * w * params@dw_full)[w > 4.19 & w <= 90])))
+
+# -Inf is legitimate: bins at or above w_pp_cutoff hold no resource.
+stopifnot(!anyNA(out_isimip),
+          all(out_isimip < Inf),
+          any(is.finite(out_isimip)),
+          max(abs(err)) < 1e-8,
+          # the extension must be monotone decreasing and finite where it applies
+          all(is.finite(out_isimip[1, w < cut_off])),
+          abs(mean(isimip_slope) - coef(lm(ref ~ log10(params@w_full[ok])))[2]) < 0.25)
+
+```
+
+
+
+```{r}
+
+```
+

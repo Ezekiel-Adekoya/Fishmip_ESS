@@ -81,7 +81,7 @@ library(here)
 knitr::opts_knit$set(root.dir = here())
 
 # Folder for the model-ready outputs (defined here; not written to in this file)
-save_dir <- file.path(here(), "Ess_Thermizer_data")
+save_dir <- file.path(here(), "Ess_Fishmip_data")
 ```
 
 ## Load required libraries
@@ -571,9 +571,26 @@ write.csv(combined_wide_layers, "Temp_by depth.csv", row.names = FALSE)
 dir.create(save_dir, showWarnings = FALSE, recursive = TRUE)
 
 # Save as CSV
-write.csv(
-  combined_wide_layers,
-  file.path(save_dir, "Temp_by depth.csv"),
-  row.names = FALSE
-)
+write.csv( combined_wide_layers, file.path(save_dir, "Temp_by depth.csv"),row.names = FALSE)
+
+# Long format so both layers share one panel and one legend
+plot_layers <- combined_wide_layers %>%
+  pivot_longer(c(r0to50, r50to150), names_to = "layer", values_to = "temp") %>%
+  mutate(layer = factor(layer, levels = c("r0to50", "r50to150"),
+                        labels = c("0-50 m", "50-150 m")))
+
+p_layers <- ggplot(plot_layers, aes(year, temp, colour = layer)) +
+  geom_line(linewidth = 0.7, na.rm = TRUE) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed",
+              linewidth = 0.5, na.rm = TRUE) +     # linear trend per layer
+  scale_colour_manual(values = c("0-50 m" = "firebrick",
+                                 "50-150 m" = "royalblue")) +
+  labs(title = "Bias-corrected GFDL temperature by layer, Eastern Scotian Shelf",
+       subtitle = "Annual means, 1961-2010 (dashed = linear trend)",
+       x = NULL, y = "Temperature (\u00b0C)", colour = "Layer") +
+  theme_bw()
+
+print(p_layers)
+
+
 ```

@@ -1,0 +1,137 @@
+---
+title: "GFDL obsclim Plankton Processing, Eastern Scotian Shelf (1961-2010)"
+author: "Ezekiel"
+date: "2025-09-19"
+output: pdf_document
+---
+
+The ISIMIP3b projection (2015-2100), the delta bias correction and the
+2011-2014 gap fill have been removed. This file only processes the GFDL-MOM6-COBALT2
+obsclim series for 1961-2010.
+
+## Set up directories
+
+```{r setup_dirs, include=TRUE}
+library(here)
+knitr::opts_knit$set(root.dir = here())
+
+# Folder for all plankton outputs
+save_dir <- file.path(here(), "Gfdl_Plankton Forcing", "plankton")
+```
+
+## Load required libraries
+
+```{r libraries}
+library(dplyr)
+library(lubridate)   # year(), dmy()
+library(readr)       # read_csv()
+library(ggplot2)
+```
+
+## Eastern Scotian Shelf plankton processing (GFDL obsclim, 1961-2010)
+
+Converts monthly, grid-cell-level, vertically-integrated plankton stock
+(mol C m-2) into an annual regional total (g wet weight) for five plankton
+variables: diatoms, diazotrophs, picophytoplankton, mesozooplankton,
+microzooplankton.
+
+Source files are GFDL-MOM6-COBALT2 obsclim. The `-vint` suffix means they were
+already vertically integrated over all ocean levels by the ISIMIP data
+management team (units: mol m-2). There is no depth column and no total_area
+column.
+
+Region area (146,360,555,008 m^2, Eastern Scotian Shelf) was confirmed from the
+FishMIP pipeline's own output metadata (`total_area`, `area_units = "m2"`).
+
+```{r process-fn}
+# Region area, Eastern Scotian Shelf (m^2)
+region_area_m2 <- 146360555008
+
+# Process one GFDL obsclim "-vint" plankton file:
+#   monthly grid cells -> monthly regional mean -> annual mean -> region total
+process_gfdl_vint <- function(file_path, var_label, region_area_m2,
+                              out_dir = save_dir) {
+  df <- read_csv(file_path, show_col_types = FALSE) |>
+    mutate(date = as.Date(substr(time, 1, 10)))
+
+  # Unweighted mean across all grid cells, per month
+  monthly_mean <- df |>
+    group_by(date) |>
+    summarise(mean_val = mean(vals, na.rm = TRUE), .groups = "drop")
+
+  # Annual mean of the monthly values (mol m-2)
+  annual_mean <- monthly_mean |>
+    mutate(year = year(date)) |>
+    group_by(year) |>
+    summarise(val = mean(mean_val, na.rm = TRUE), n_months = n(), .groups = "drop")
+
+  # Warn if any year is incomplete; its annual mean would be seasonally biased
+  if (any(annual_mean$n_months != 12)) {
+    warning(var_label, ": years with fewer than 12 months: ",
+            paste(annual_mean$year[annual_mean$n_months != 12], collapse = ", "),
+            call. = FALSE)
+  }
+
+  # mol C m-2 -> gC m-2 -> g wet weight m-2 -> region total (g wet weight)
+  # NOTE: the *10 (carbon -> wet weight) factor was set for phytoplankton
+  # (Diat/Diaz/Pico). Confirm whether Zmeso/Zmicro need a different
+  # conversion factor before trusting those two outputs quantitatively.
+  val_total <- annual_mean$val * 12.011 * 10 * region_area_m2
+  out_df <- data.frame(Year = annual_mean$year, val = val_total)
+  names(out_df) <- c("Year", var_label)   # base R naming avoids tidy-eval issues
+
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+  out_file <- file.path(out_dir, paste0("gfdl-mom6-cobalt2_obsclim_", var_label,
+    "-vint_15arcmin_eastern-scotian-shelf_annual_1961_2010.csv"))
+  write.table(out_df, out_file, row.names = FALSE, col.names = TRUE,
+              quote = FALSE, sep = ",")
+  out_df
+}
+```
+
+```{r run-all}
+in_dir <- "Gfdl_Plankton Forcing/Plankton_data"
+in_file <- function(v) {
+  file.path(in_dir, paste0("gfdl-mom6-cobalt2_obsclim_", v,
+    "-vint_15arcmin_eastern-scotian-shelf_monthly_1961_2010.csv"))
+}
+
+diat_1961_2010   <- process_gfdl_vint(in_file("phydiat"), "Diat",   region_area_m2)
+diaz_1961_2010   <- process_gfdl_vint(in_file("phydiaz"), "Diaz",   region_area_m2)
+pico_1961_2010   <- process_gfdl_vint(in_file("phypico"), "Pico",   region_area_m2)
+zmeso_1961_2010  <- process_gfdl_vint(in_file("zmeso"),   "Zmeso",  region_area_m2)
+zmicro_1961_2010 <- process_gfdl_vint(in_file("zmicro"),  "Zmicro", region_area_m2)
+```
+
+```{r combine}
+# All five in one long table, for plotting
+plankton_all <- bind_rows(
+data.frame(Year = diat_1961_2010$Year,   val = diat_1961_2010$Diat, variable = "Diatoms"),
+data.frame(Year = diaz_1961_2010$Year,   val = diaz_1961_2010$Diaz, variable = "Diazotrophs"),
+data.frame(Year = pico_1961_2010$Year,   val = pico_1961_2010$Pico, variable = "Picophytoplankton"),
+data.frame(Year = zmeso_1961_2010$Year,  val = zmeso_1961_2010$Zmeso, variable = "Mesozooplankton"),
+data.frame(Year = zmicro_1961_2010$Year,val = zmicro_1961_2010$Zmicro,variable = "Microzooplankton"))
+```
+
+## Export in model-input format (1961-2010)
+
+Two columns, `V1` (01-JAN of each year) and `V2` (annual regional total,
+g wet weight), no row names and no quotes.
+
+```{r export-model-input}
+write_model_input <- function(df, value_col, label, out_dir = save_dir) {
+  out <- data.frame(V1 = dmy(paste0("01-JAN-", df$Year)),
+                    V2 = df[[value_col]]) |>
+    filter(year(V1) >= 1961 & year(V1) <= 2010)
+  write.csv(out,
+            file.path(out_dir, paste0("GFDL_obsclim_", label, "_1961_2010.csv")),
+            row.names = FALSE, quote = FALSE)
+  invisible(out)
+}
+
+write_model_input(diat_1961_2010,   "Diat",   "diat")
+write_model_input(diaz_1961_2010,   "Diaz",   "diaz")
+write_model_input(pico_1961_2010,   "Pico",   "pico")
+write_model_input(zmeso_1961_2010,  "Zmeso",  "meso")
+write_model_input(zmicro_1961_2010, "Zmicro", "micro")
+```
