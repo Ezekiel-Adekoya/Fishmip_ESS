@@ -1,0 +1,11 @@
+{
+    "_ARRAY_DIMENSIONS": [
+        "depth_bin_m"
+    ],
+    "axis": "Z",
+    "cartesian_axis": "Z",
+    "edges": "z_i",
+    "long_name": "Depth at cell center",
+    "positive": "down",
+    "units": "meters"
+}

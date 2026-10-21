@@ -1,0 +1,163 @@
+{
+    "metadata": {
+        ".zattrs": {},
+        ".zgroup": {
+            "zarr_format": 2
+        },
+        "depth_bin_m/.zarray": {
+            "chunks": [
+                35
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f8",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                35
+            ],
+            "zarr_format": 2
+        },
+        "depth_bin_m/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "depth_bin_m"
+            ],
+            "axis": "Z",
+            "cartesian_axis": "Z",
+            "edges": "z_i",
+            "long_name": "Depth at cell center",
+            "positive": "down",
+            "units": "meters"
+        },
+        "lat/.zarray": {
+            "chunks": [
+                13
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f8",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                13
+            ],
+            "zarr_format": 2
+        },
+        "lat/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "lat"
+            ],
+            "axis": "Y",
+            "long_name": "latitude",
+            "standard_name": "latitude",
+            "units": "degrees_north"
+        },
+        "lon/.zarray": {
+            "chunks": [
+                27
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f8",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                27
+            ],
+            "zarr_format": 2
+        },
+        "lon/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "lon"
+            ],
+            "axis": "X",
+            "long_name": "longitude",
+            "standard_name": "longitude",
+            "units": "degrees_east"
+        },
+        "thetao/.zarray": {
+            "chunks": [
+                600,
+                5,
+                13,
+                27
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<f4",
+            "fill_value": "NaN",
+            "filters": null,
+            "order": "C",
+            "shape": [
+                600,
+                35,
+                13,
+                27
+            ],
+            "zarr_format": 2
+        },
+        "thetao/.zattrs": {
+            "GFDL_variable": "thetao",
+            "_ARRAY_DIMENSIONS": [
+                "time",
+                "depth_bin_m",
+                "lat",
+                "lon"
+            ],
+            "long_name": "Sea Water Potential Temperature",
+            "standard_name": "sea_water_potential_temperature",
+            "units": "degC"
+        },
+        "time/.zarray": {
+            "chunks": [
+                600
+            ],
+            "compressor": {
+                "blocksize": 0,
+                "clevel": 5,
+                "cname": "lz4",
+                "id": "blosc",
+                "shuffle": 1
+            },
+            "dtype": "<i8",
+            "fill_value": null,
+            "filters": null,
+            "order": "C",
+            "shape": [
+                600
+            ],
+            "zarr_format": 2
+        },
+        "time/.zattrs": {
+            "_ARRAY_DIMENSIONS": [
+                "time"
+            ],
+            "calendar": "proleptic_gregorian",
+            "units": "days since 1961-01-01 00:00:00"
+        }
+    },
+    "zarr_consolidated_format": 1
+}

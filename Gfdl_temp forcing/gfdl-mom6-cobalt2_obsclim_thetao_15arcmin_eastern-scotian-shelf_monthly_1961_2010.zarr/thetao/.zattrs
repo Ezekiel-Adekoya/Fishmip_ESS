@@ -1,0 +1,12 @@
+{
+    "GFDL_variable": "thetao",
+    "_ARRAY_DIMENSIONS": [
+        "time",
+        "depth_bin_m",
+        "lat",
+        "lon"
+    ],
+    "long_name": "Sea Water Potential Temperature",
+    "standard_name": "sea_water_potential_temperature",
+    "units": "degC"
+}
