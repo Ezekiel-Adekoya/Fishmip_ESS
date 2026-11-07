@@ -1,3 +1,4 @@
 
 *.nc
 Ess_Fishmip_data/
+.DS_Store
