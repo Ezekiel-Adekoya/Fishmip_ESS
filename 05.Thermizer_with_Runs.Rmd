@@ -1,0 +1,1424 @@
+---
+title: "Exploring thermal effects using Thermizer"
+author: "Ezekiel"
+date: "2026-01-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Set up directories
+```{r dirs, include=FALSE}
+# Chunk renamed from "setup" (duplicate labels make knitr abort).
+library("here")
+# root.dir from here() rather than a hardcoded absolute path, so relative
+# paths work on any machine.
+knitr::opts_knit$set(root.dir = here())
+```
+
+
+LOAD Library
+```{r libraries}
+## Required for starters
+# install.packages("remotes")
+# remotes::install_github("sizespectrum/mizerExperimental", force = TRUE)
+# remotes::install_github("sizespectrum/therMizer", force = TRUE)
+
+# tidyverse first (it already attaches ggplot2, dplyr, tidyr), so that the
+# mizer packages loaded after it win any masking conflicts.
+library(tidyverse)
+library(assertthat)
+library(pbapply)
+library(patchwork)
+library(here)
+library(mizer)
+library(mizerExperimental)
+library(therMizer)
+#library(optimParallel)
+```
+
+Shared functions (`randomize_interaction_matrix`, `run_paired_sims`, and the
+project's gear/selectivity helpers) live in `Ess_Fishmip_data/Useful_functions.R`:
+single source of truth, also used by the standalone `run_ensemble_sims.R`
+generator. This must be loaded BEFORE any `setParams()`-triggering call, because
+`gaussian_sizeweight` is the `sel_func` for the Seals gear rows.
+```{r load-shared-functions}
+source("Ess_Fishmip_data/Useful_functions.R")
+
+# Gaussian prey size-selectivity for seals (used by mizer internally).
+# Defined here only as a fallback if Useful_functions.R did not supply it.
+if (!exists("gaussian_sizeweight")) {
+  gaussian_sizeweight <- function(w, species_params, w_opt, sigma, ...) {
+    exp(-0.5 * ((log(w) - log(w_opt)) / sigma)^2)
+  }
+}
+```
+
+# Load params from base mizer calibration
+
+Thermal ranges come from FishBase, with documented departures below.
+DFO. 2014. Assessment of Spiny Dogfish in the Northwest Atlantic. DFO Can. Sci.
+Advis. Sec. Sci. Advis. Rep. 2014/055.
+
+```{r load-params}
+# Use stage 1 because stage 2 is not stable
+params <- readRDS("Ess_Fishmip_data/params_stage1_steady.RDS")
+thermal_data <- read.csv("Ess_Fishmip_data/species_params_with_temp.csv")
+
+# thermal_data rows are assumed to align positionally with species_params.
+# Assert it: a silent reorder would assign thermal limits to the wrong species.
+stopifnot(identical(as.character(thermal_data$Common_Name),
+                    as.character(params@species_params$species)))
+params@species_params$temp_min <- thermal_data$TempPrefMin
+params@species_params$temp_max <- thermal_data$TempPrefMax
+
+# ---- Documented departures from the FishBase estimate() baseline -----------
+# FishBase TempPrefMin/Max come from estimate(), the AquaMaps-derived envelope:
+# an occurrence (realised-niche) range, not physiological limits. therMizer uses
+# these as a thermal PERFORMANCE curve, so where the envelope disagrees with
+# where the species actually lives on this shelf, the scaling collapses to zero.
+set_temp <- function(p, sp, tmin, tmax) {
+  i <- which(p@species_params$species == sp)
+  stopifnot(length(i) == 1)
+  p@species_params$temp_min[i] <- tmin
+  p@species_params$temp_max[i] <- tmax
+  p
+}
+
+# Capelin and Red Hake were proxy-filled in 00.Params_extraction.R (herring and
+# white hake proxies). FishBase now has real values; uncomment to use them.
+#params <- set_temp(params, "Capelin",  0.3,  7.1)   # was 0.5-11.2 (herring proxy)
+#params <- set_temp(params, "Red Hake", 1.6, 11.1)   # was 1.2-7.8  (white hake proxy)
+
+# Spiny Dogfish: the only species with exactly ZERO scaling at the reference
+# state (weighted 100% to r50to150 at 4.03 C while FishBase temp_min = 4.2).
+# FishBase stocks() is worse (7.0-15.0), so use DFO (2014).
+params <- set_temp(params, "Spiny Dogfish", 0, 12)
+
+# Thorny Skate: AquaMaps gives -0.8 to 5.0 (mean 1.0 C), the Arctic core rather
+# than the tolerance. That puts the whole shallow stratum (6.66 C) outside the
+# range, contradicting the survey (8 strata, 18.4% of stratum 447), and the deep
+# realm (4.86 C by 2015-24) ends up within 0.14 C of tmax, so performance more
+# than halves (0.723 -> 0.317) and hits zero past 5.0 C. That is an artefact of
+# the envelope, not a thermal response. stocks() gives -1.3 to 14.0 ("boreal").
+params <- set_temp(params, "Thorny Skate", -1.3, 14.0)   # was -0.8-5.0
+
+stopifnot(all(params@species_params$temp_max > params@species_params$temp_min))
+```
+
+### Setting up the resource
+```{r resource}
+# Dynamic runs use the full 1861-2010 forcing. The 1978-81 window is only the
+# REFERENCE state, used below for sanity checks (Paper 1's Stage-1 reference,
+# chosen by a rolling-window stationarity screen of survey biomass).
+reference_years <- 1978:1981
+
+spectra_file <- "Ess_Fishmip_data/GFDL_resource_spectra.dat"
+isimip_plankton <- as.matrix(read.table(spectra_file, header = TRUE, check.names = FALSE))
+# 04 now writes year row names; fall back to counting from 1861 if absent
+if (is.null(rownames(isimip_plankton)) ||
+    anyNA(suppressWarnings(as.numeric(rownames(isimip_plankton))))) {
+  rownames(isimip_plankton) <- 1861:(1861 + nrow(isimip_plankton) - 1)
+}
+stopifnot(all(as.character(reference_years) %in% rownames(isimip_plankton)))
+stopifnot(ncol(isimip_plankton) == length(params@w_full))   # 04 must match this base
+
+sizes <- names(params@initial_n_pp)
+
+# Diagnostic: reference-period resource (log10 numbers per bin, as 04 writes it)
+# vs Paper 1's calibrated resource. Not used by the dynamic run.
+n_pp_ref <- colMeans(isimip_plankton[as.character(reference_years), , drop = FALSE])
+ok_pp <- params@initial_n_pp > 0
+lvl <- median((n_pp_ref - log10(params@dw_full))[ok_pp] -
+              log10(params@initial_n_pp[ok_pp]))
+message("resource reference ", min(reference_years), "-", max(reference_years),
+        " mean vs Paper 1 calibrated resource, median: ",
+        sprintf("%+.4f log10 (x%.3g)", lvl, 10^lvl))
+```
+
+### Setting up temperature-related information
+```{r temperature}
+ocean_temp_raw <- read.csv("Ess_Fishmip_data/Temp_by_depth_spin.csv", header = TRUE)
+rownames(ocean_temp_raw) <- as.character(ocean_temp_raw$year)
+ocean_temp_all <- as.matrix(ocean_temp_raw[, setdiff(names(ocean_temp_raw), "year")])
+stopifnot(all(as.character(reference_years) %in% rownames(ocean_temp_all)))
+
+temp_ref <- colMeans(ocean_temp_all[as.character(reference_years), , drop = FALSE])
+message("temperature reference: ",
+        paste(sprintf("%s %.2f C", names(temp_ref), temp_ref), collapse = ", "))
+
+# Sanity check: no species should sit outside its thermal range in EVERY realm
+# at the reference state (that gives zero scaling, i.e. a hard extinction rather
+# than a gradient). Checks that at least one realm's reference temperature lies
+# strictly inside (temp_min, temp_max) for each species.
+in_range <- vapply(seq_len(nrow(params@species_params)), function(i) {
+  any(temp_ref > params@species_params$temp_min[i] &
+      temp_ref < params@species_params$temp_max[i])
+}, logical(1))
+stopifnot(all(in_range))
+```
+
+```{r warnings-note, include=FALSE}
+# TWO WARNINGS FROM upgradeTherParams / projection ARE EXPECTED AND BENIGN.
+#
+# 1. "The dimnames of the second dimension of `n_pp_array` are not the same as
+#    the ones in `w_full` ... have been replaced by `w_full`" (once). A therMizer
+#    bug: it compares a CHARACTER dimnames vector against a NUMERIC one, so the
+#    check is always FALSE. therMizer then assigns correct numeric-parseable
+#    names itself, which plankton_forcing() needs for the w_pp_cutoff test.
+#
+# 2. "There is no `balance_plankton_forcing()` function, so the resource
+#    capacity could not be rebalanced". therMizer supplies no balancing function
+#    for its resource dynamics. Harmless for the dynamic runs here.
+```
+
+# Load vertical migration and exposure arrays
+```{r migration-exposure}
+tmp_env <- new.env()
+load("Ess_Fishmip_data/GFDL_ESS_vertical_migration_array.Rdata", envir = tmp_env)
+vertical_migration_array <- tmp_env$vertical_migration_array
+exposure_array <- as.matrix(read.csv("Ess_Fishmip_data/GFDL_ESS_exposure_array.csv",
+                                     row.names = 1, check.names = FALSE))
+```
+
+# Build the time-varying (dynamic) params
+
+A steady state under time-varying forcing does not exist (the forcing moves every
+year, so the solver cannot converge). Steady-state calibration needs
+constant-in-time inputs and belongs in the separate calibration script. This file
+runs the DYNAMICS with `project()`.
+
+```{r dynamic-params}
+params <- validParams(params)
+
+# Both must cover the same years, in the same order
+stopifnot(nrow(ocean_temp_all) == nrow(isimip_plankton),          # 150 each
+          identical(rownames(ocean_temp_all), rownames(isimip_plankton)))
+
+# n_pp_array: years x size bins
+n_pp_array_dyn <- isimip_plankton
+dimnames(n_pp_array_dyn) <- list(time = rownames(isimip_plankton), w = sizes)
+
+params_dyn <- upgradeTherParams(params,
+                  ocean_temp = ocean_temp_all,           # 150 x 2
+                  n_pp_array = n_pp_array_dyn,           # 150 x 211
+                  vertical_migration_array = vertical_migration_array,
+                  exposure_array = exposure_array,
+                  aerobic_effect = TRUE,
+                  metabolism_effect = TRUE)
+```
+
+## Effort (factual run)
+
+```{r effort}
+eff <- read.csv("Ess_Fishmip_data/Effort_spin_1861_2010.csv", check.names = FALSE)
+stopifnot(nrow(eff) == 150)
+
+eff <- eff[, setdiff(names(eff), "year")]          # drop year by name, not position
+effort_factual <- as.matrix(eff)
+rownames(effort_factual) <- 1861:2010
+
+# # ---- Scenario A: no effort (all gears, including seals, set to 0) ----
+# no_effort <- effort_factual
+# no_effort[] <- 0
+
+# Reference factual run (no randomisation). Uses params_dyn so it has the same
+# thermal and plankton forcing as the randomised runs; otherwise the relative
+# plot would compare thermal vs non-thermal rather than random vs base web.
+sim0 <- project(params_dyn, effort = effort_factual)
+
+# Quick test: one randomised-web run
+rand_params <- randomize_interaction_matrix(params_dyn)
+sim1 <- project(rand_params, effort = effort_factual)
+plot(sim1, time_range = 1961:2010)
+plotBiomassRelative(sim1, sim0)
+```
+
+## Ensemble over randomised food webs (factual only)
+
+Structural-uncertainty robustness test: `randomize_interaction_matrix()` multiplies
+each existing interaction-matrix entry and each seal catchability by lognormal
+noise (SD = `sd_web`), scaling existing link strengths while keeping topology
+(zeros stay zero). Each member is projected from the calibrated state (a transient
+hindcast, not equilibrium). `sd_web = 0.1` (~10% CV per link) is the primary
+setting; 0.2 is a stronger stress test.
+
+```{r}
+eff <- read.csv("Ess_Fishmip_data/Effort_spin_1861_2010.csv", check.names = FALSE)
+stopifnot(nrow(eff) == 150)
+
+eff <- eff[, setdiff(names(eff), "year")]          # drop year by name, not position
+effort_factual <- as.matrix(eff)
+rownames(effort_factual) <- 1861:2010
+
+effort_no_fishing <- effort_factual
+effort_no_fishing[, colnames(effort_no_fishing) != "Seals"] <- 0   # all gears 0 except Seals
+write.csv(effort_no_fishing,"Ess_Thermizer_data/effort_no_fishing.csv", row.names = FALSE)
+effort_counter<- effort_no_fishing
+
+```
+
+
+## Read in sims with and without sims (we are working with the one with seals)
+```{r}
+# ── ENSEMBLE: factual vs counterfactual over randomised food webs ─────────────
+# Structural-uncertainty robustness test: randomize_interaction_matrix() multiplies each
+# existing interaction-matrix entry AND each seal catchability by lognormal noise (SD =
+# sd_web) - scaling existing link STRENGTHS (topology preserved, zeros stay zero) and
+# perturbing seal predation the same way. Projected from the calibrated 1978 state (a
+# transient hindcast, not equilibrium). PAIRED: same web under both scenarios, so the
+# per-web difference isolates the seal effect and cancels the perturbation drift =>
+# base conclusions on the paired difference / fraction of webs, not the ribbon spread.
+# sd_web = 0.1 = primary (~10% CV/link, realistic); 0.2 = stronger stress test (below).
+n_sims <- 10; sd_web <- 0.1
+
+# CACHE GUARD: the n=1000 paired ensemble is the expensive step (~15 min). Run it
+# ONCE; every later knit reads the saved RDS in seconds. To regenerate after changing
+# `params`, set force_resim <- TRUE before this chunk (or delete the two RDS files).
+cache_f <- "Ess_Fishmip_data/sims_with_fishing.RDS"   # seal increase (factual)
+cache_c <- "Ess_Fishmip_data/sims_with_no_fishing.RDS"   # seals constant (counterfactual)
+if (file.exists(cache_f) && file.exists(cache_c) && !exists("force_resim")) {
+  sims_factual <- readRDS(cache_f)
+  sims_counter <- readRDS(cache_c)
+  cat(sprintf("Loaded cached ensemble: %d paired members (set force_resim<-TRUE to rerun)\n",
+              length(sims_factual)))
+} else {
+  paired <- run_paired_sims(params_dyn, n_sims = n_sims, sd = sd_web,
+                            effort_factual = effort_factual,
+                            effort_counter = effort_counter, seed = 42)
+  sims_with_fishing <- paired$factual
+  sims_with_no_fishing <- paired$counter
+
+  # Keep only COMPLETE pairs (drop index i if either scenario failed) so the two lists
+  # stay aligned & indexable: factual[[k]] and counter[[k]] are the SAME web.
+  ok <- which(!vapply(sims_with_fishing, is.null, logical(1)) &
+              !vapply(sims_with_no_fishing, is.null, logical(1)))
+  sims_with_fishing <- sims_with_fishing[ok]; sims_with_no_fishing <- sims_with_no_fishing[ok]
+  cat(sprintf("Kept %d / %d complete paired ensemble members\n", length(ok), n_sims))
+
+  # Save sim outputs (complete-pair filtered) for downstream use (04_Indicators)
+  saveRDS(sims_with_fishing, cache_f)
+  saveRDS(sims_with_no_fishing, cache_c)
+}
+
+# Aliases for the downstream figure code (scen2 = factual/with seal increase;
+# scen1 = counterfactual/no seal increase) — now PAIRED by index
+#sims_scen2 <- sims_factual
+#sims_scen1 <- sims_counter
+
+
+# Save sim outputs (complete-pair filtered) for downstream use (04_Indicators)
+saveRDS(sims_with_fishing, "Ess_Fishmip_data/sims_with_fishing.RDS")   # seal increase (factual)
+saveRDS(sims_with_no_fishing, "Ess_Fishmip_data/sims_with_no_fishing.RDS")   # seals constant (counterfactual)
+sims_with_fishing <- readRDS("Ess_Fishmip_data/sims_with_fishing.RDS")
+sims_with_no_fishing <- readRDS("Ess_Fishmip_data/sims_with_no_fishing.RDS")
+
+
+# Check results from first simulation
+plot(sims_with_fishing[[1]],time_range=c(1961:2010))
+
+plotBiomassRelative(sims_with_fishing[[1]],sim0)
+```
+
+## Biomass Check
+## Biomass Figures - make plot of obs and sims
+
+REDO THIS USING DATA ABOVE:
+Read in Abundance and Biomass at length from DFO RV Summer Survey (from DFO Maritimes region data team, 4VsW - see methods)
+convert from KG to grams. 
+Prior to calculation need to truncate the biomass at length by the same length cut_off used in the model.
+Rename columns
+```{r}
+# Recalculate total annual biomass from raw survey data, 4VsW strata (443-466)
+# Replaces pre-processed DFO_Biomass_selected_species.csv for strata consistency
+stat <- read.csv("Ess_Thermizer_data/LF_Biomass_Abund.csv")
+
+# ── LOOKUP: RAW SURVEY NAME -> MODEL NAME ────────────────────────────────────
+species_code_lookup <- c(
+  "COD(ATLANTIC)"             = "Atlantic Cod",
+  "HADDOCK"                   = "Haddock",
+  "WHITE HAKE"                = "White Hake",
+  "SILVER HAKE"               = "Silver Hake",
+  "POLLOCK"                   = "Pollock",
+  "REDFISH UNSEPARATED"       = "Redfish Unseparated",
+  "AMERICAN PLAICE"           = "American Plaice",
+  "YELLOWTAIL FLOUNDER"       = "Yellowtail Flounder",
+  "SPINY DOGFISH"             = "Spiny Dogfish",
+  "HALIBUT(ATLANTIC)"         = "Atlantic Halibut",
+  "SQUIRREL OR RED HAKE"      = "Red Hake",
+  "MONKFISH,GOOSEFISH,ANGLER" = "Monkfish",
+  "NORTHERN SAND LANCE"       = "Sand Lance",
+  "WITCH FLOUNDER"            = "Witch Flounder",
+  "HERRING(ATLANTIC)"         = "Atlantic Herring",
+  "THORNY SKATE"              = "Thorny Skate",
+  "WINTER SKATE"              = "Winter Skate",
+  "LONGHORN SCULPIN"          = "Longhorn Sculpin",
+  "CAPELIN"                   = "Capelin")
+species_order <- c( "Atlantic Cod", "Haddock", "White Hake", "Red Hake", "Silver Hake",
+                    "Pollock", "Redfish Unseparated","American Plaice", "Yellowtail Flounder",
+                    "Witch Flounder", "Atlantic Herring","Capelin", "Thorny Skate", 
+                    "Winter Skate", "Spiny Dogfish", "Monkfish", "Sand Lance",
+                    "Longhorn Sculpin",  "Atlantic Halibut")
+
+biomass_obs <- stat %>%
+  mutate(strat_num = suppressWarnings(as.numeric(as.character(STRAT)))) %>%
+  filter(!is.na(strat_num), strat_num >= 443, strat_num <= 466,
+         YEAR >= 1970, YEAR <= 2024) %>%
+  mutate(species_name = species_code_lookup[COMMON_NAME]) %>%
+  filter(!is.na(species_name)) %>%
+  group_by(Year = YEAR, species_name) %>%
+  summarise(biomass_g = sum(Biomass_Strata_KG, na.rm = TRUE) * 1e3, .groups = "drop") %>%
+  pivot_wider(names_from = species_name, values_from = biomass_g, values_fill = 0) %>%
+  select(Year, any_of(species_order))
+biomass_obs[is.na(biomass_obs)] <- 0
+
+## ── FORAGE-FISH SURVEY CATCHABILITY ──────────────────────────────────────────
+## The bottom-trawl survey under-represents the small pelagics for TWO distinct
+## reasons, which the occurrence analysis (above) lets us separate:
+##  - SIZE SELECTIVITY (a missing juvenile end): handled NOT by scaling but by the
+##    occurrence-based lower cutoff + matchBiomasses over the comparable adult
+##    range — mizer then ESTIMATES the unsampled small end self-consistently.
+##  - WHOLE-POPULATION AVAILABILITY (off-bottom / sediment-burying): the survey
+##    misses individuals of ALL sizes, so there is NO hidden size range for the
+##    model to fill; this genuinely needs an explicit catchability multiplier.
+## Occurrence evidence (fraction of years each 2-cm bin is caught):
+##  - Atlantic Herring: adults 22-34 cm caught reliably, juveniles <16 cm missed
+##    -> a real juvenile gap. We TESTED dropping the x50 (size-range matching the
+##    adult window): it FAILED -- the unscaled adult target is ~50x too small for
+##    herring to seed itself against web predation, so erepro -> Inf (>1) on the
+##    first matchBiomasses iteration. CONCLUSION: herring's bottom-trawl deficit is
+##    NOT only a juvenile size gap but also ADULT AVAILABILITY (pelagic/off-bottom)
+##    -- the adult window is itself under-caught, so size-range matching can't
+##    recover it. Restored to x50. The juvenile end is still extrapolated by mizer
+##    below the cutoff; the x50 now stands for adult availability.
+##  - Sand Lance (8-24 cm) & Capelin (10-16 cm): the survey samples nearly their
+##    WHOLE size range, so under-representation is availability, not truncation ->
+##    keep an explicit catchability multiplier (was x200; based approx. on
+##    Harley et al. 2001 and Bundy et al.). TEST SENSITIVITY.
+forage_catchability_mult <- c(
+  `Atlantic Herring` = 50,   # adult availability (pelagic/off-bottom); x1 test -> erepro Inf
+  `Sand Lance`       = 3000, # was 200; BOOSTED so sand lance is the dominant forage & main
+                             # seal prey (Bowen 81%), letting selective seals feed on it
+                             # instead of cropping herring to extinction. Sediment-burying =>
+                             # survey catches a tiny fraction of true stock, so a large factor
+                             # is defensible. TUNE: raise if seals still crash herring/capelin;
+                             # lower if sand lance over-dominates or will not sustain.
+  `Capelin`          = 200)  # availability deficit (pelagic / off-bottom)
+for (sp in names(forage_catchability_mult))
+  biomass_obs[[sp]] <- biomass_obs[[sp]] * forage_catchability_mult[[sp]]
+
+
+library(reshape2)
+#Aggregate observed biomass to mean biomass
+biomass_obs_sub <- subset(biomass_obs, Year >= 1970 & Year <= 2024)
+biomass_ts <- reshape2::melt(biomass_obs_sub, id.vars = 1)
+names(biomass_ts)<-c("Year","Species","Biomass")
+
+biomass_ts <- biomass_ts|> rename(Biomass_Obs = Biomass)
+
+```
+
+# biomass_plot by species
+```{r}
+library(ggpubr)   # provides theme_pubr()
+# ---- Species labels -----------------------------------------------------------
+# Display names, in the SAME ORDER as species_params(params)$species.
+species_labels <- c(
+  "Atlantic Cod", "Haddock", "White Hake", "Red Hake", "Silver Hake", "Pollock",
+  "Redfish Unseparated", "American Plaice", "Yellowtail Flounder", "Witch Flounder",
+  "Atlantic Herring", "Capelin", "Thorny Skate", "Winter Skate", "Spiny Dogfish",
+  "Monkfish", "Sand Lance", "Longhorn Sculpin", "Atlantic Halibut")
+
+sp_names <- as.character(species_params(params)$species)
+stopifnot("species_labels must have one entry per species in params" =
+            length(species_labels) == length(sp_names))
+stopifnot("biomass_ts species names do not match params species names" =
+            all(as.character(biomass_ts$Species) %in% sp_names))
+
+# Look up by NAME rather than renaming factor levels by position
+label_map <- setNames(species_labels, sp_names)
+
+# Facet order: the order listed above, or small -> large maximum body weight
+order_by_size <- FALSE
+facet_levels <- if (order_by_size) {
+  species_labels[order(species_params(params)$w_max)]
+} else {
+  species_labels
+}
+
+# ---- Observations -------------------------------------------------------------
+obs <- biomass_ts |>
+  transmute(Species = factor(unname(label_map[as.character(Species)]), levels = facet_levels),
+            Year,
+            Biomass = Biomass_Obs) |>
+  filter(Biomass > 0)
+
+# ---- Simulated biomass --------------------------------------------------------
+# One data frame per ensemble member, stacked with a sim index
+extract_biomass <- function(sims) {
+  lapply(sims, function(x) {
+    m <- reshape2::melt(getBiomass(x, min_w = species_params(params)$biomass_cutoff),
+                        varnames = c("time", "Species"), value.name = "value")
+    m$time    <- as.numeric(as.character(m$time))
+    m$Species <- as.character(m$Species)
+    m
+  }) |>
+    bind_rows(.id = "sim")
+}
+
+# Median and min/max envelope across ensemble members, per species and year
+summarise_ensemble <- function(df, scenario) {
+  df |>rename(Year = time) |> group_by(Species, Year) |>
+    summarise(sim_mean  = median(value),sim_lower = min(value),sim_upper = max(value),
+              .groups = "drop") |>mutate(Scenario = scenario)
+}
+
+scen_levels <- c("Counterfactual (without fishing)", "Factual (with fishing)")
+scen_cols   <- c("Counterfactual (without fishing)" = "#4575B4",
+                 "Factual (with fishing)"            = "#D73027")
+
+# sims_with_fishing is the FACTUAL ensemble; sims_with_no_fishing the COUNTERFACTUAL
+sim_df <- bind_rows(
+  summarise_ensemble(extract_biomass(sims_with_fishing),    scen_levels[2]),
+  summarise_ensemble(extract_biomass(sims_with_no_fishing), scen_levels[1])
+) |>
+  # show the simulations over the span of the observations; they are no longer
+  # cut to observed years only, so the lines are continuous
+  filter(Year >= 1961, Year <= 2010) |>
+  mutate(Scenario = factor(Scenario, levels = scen_levels),
+         Species  = factor(unname(label_map[Species]), levels = facet_levels))
+
+# ---- Plot ---------------------------------------------------------------------
+biomass_plot <- ggplot(sim_df, aes(x = Year, colour = Scenario, fill = Scenario)) +
+  facet_wrap(~Species, scales = "free") +
+  geom_ribbon(aes(ymin = sim_lower / 1e9, ymax = sim_upper / 1e9),
+              alpha = 0.4, colour = NA) +
+  geom_line(aes(y = sim_mean / 1e9)) +
+  # observations drawn once, not once per scenario
+  geom_point(data = obs, aes(x = Year, y = Biomass / 1e9),
+             inherit.aes = FALSE, colour = "black", size = 0.5) +
+  geom_vline(xintercept = 1981, linetype = "dashed", colour = "black") +
+  scale_colour_manual(name = NULL, values = scen_cols) +
+  scale_fill_manual(name = NULL, values = scen_cols) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 4)) +
+  # automatic accuracy: accuracy = 1 rounded small-species ticks to "0"
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 4),
+                     labels = scales::label_number()) +
+  labs(y = "Biomass (kt)", x = "Year") +
+  theme_pubr() +
+  theme(
+    legend.position  = "bottom",
+    legend.text      = element_text(face = "bold", size = 12),
+    axis.title.x     = element_text(face = "bold"),
+    axis.title.y     = element_text(face = "bold"),
+    axis.text.x      = element_text(face = "bold"),
+    axis.text.y      = element_text(face = "bold"),
+    strip.text       = element_text(face = "bold", size = 12),
+    panel.grid.minor = element_blank(),
+    # fill = NA is essential: without it the border rectangle is filled white
+    # and paints over the data
+    panel.border     = element_rect(fill = NA, colour = "black", linewidth = 0.8))
+
+# ggsave("Ess_Fishmip_data/biomass_plot.jpeg", plot = biomass_plot,
+#        width = 13, height = 8.5, units = "in", dpi = 400)
+
+biomass_plot
+
+```
+
+# Total biomass across species.
+```{r}
+
+# Total biomass across species.
+# extract_biomass(), obs, scen_levels, scen_cols, sims_with_fishing, sims_with_no_fishing
+
+# ---- Simulated total ----------------------------------------------------------
+# Sum across species WITHIN each ensemble member first, then take the median and
+# min/max across members. (Summing the per-species medians/mins/maxes in sim_df
+# would not give the median/min/max of the total.)
+total_ensemble <- function(sims, scenario) {
+  extract_biomass(sims) |>
+    rename(Year = time) |>
+    filter(Year >= min(obs$Year), Year <= max(obs$Year)) |>
+    group_by(sim, Year) |>
+    summarise(total = sum(value), .groups = "drop") |>
+    group_by(Year) |>
+    summarise(sim_mean  = median(total),
+              sim_lower = min(total),
+              sim_upper = max(total),
+              .groups = "drop") |>
+    mutate(Scenario = scenario)
+}
+
+sim_total <- bind_rows(
+  total_ensemble(sims_with_fishing,    scen_levels[2]),
+  total_ensemble(sims_with_no_fishing, scen_levels[1])
+) |>
+  mutate(Scenario = factor(Scenario, levels = scen_levels))
+
+# ---- Observed total -----------------------------------------------------------
+obs_total <- obs |>
+  group_by(Year) |>
+  summarise(Biomass = sum(Biomass), n_species = n_distinct(Species), .groups = "drop")
+
+# A total is only comparable across years if the same species are present each year
+print(table(obs_total$n_species))
+
+# ---- Plot ---------------------------------------------------------------------
+total_plot <- ggplot(sim_total, aes(x = Year, colour = Scenario, fill = Scenario)) +
+  geom_ribbon(aes(ymin = sim_lower / 1e9, ymax = sim_upper / 1e9),
+              alpha = 0.4, colour = NA) +
+  geom_line(aes(y = sim_mean / 1e9)) +
+  geom_point(data = obs_total, aes(x = Year, y = Biomass / 1e9),
+             inherit.aes = FALSE, colour = "black", size = 1) +
+  geom_vline(xintercept = 1981, linetype = "dashed", colour = "black") +
+  scale_colour_manual(name = NULL, values = scen_cols) +
+  scale_fill_manual(name = NULL, values = scen_cols) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+  scale_y_continuous(labels = scales::label_number()) +
+  labs(y = "Total biomass (kt)", x = "Year") +
+  theme_pubr() +
+  theme(
+    legend.position = "bottom",
+    legend.text     = element_text(face = "bold", size = 12),
+    axis.title      = element_text(face = "bold"),
+    axis.text       = element_text(face = "bold"),
+    panel.border    = element_rect(fill = NA, colour = "black", linewidth = 0.8))
+
+total_plot
+
+```
+
+
+
+Figure for CATCHES 
+```{r}
+# Figure for CATCHES
+# Needs: sims_with_fishing, label_map, library(ggpubr)
+# The counterfactual (no fishing) has zero catch by construction, so it is built
+# as zeros from the factual table rather than extracted from sims_with_no_fishing
+# (plotYieldGear returns no rows for it, which caused the "0, 1 rows" error).
+
+# read in observed catch data
+yield_ts <- readRDS("Ess_Fishmip_data/yield_ts.RDS")
+yield_ts <- yield_ts |> rename(Yield_Obs = Yield) |>
+  filter(!Species %in% c("Sand Lance", "Capelin", "Longhorn Sculpin")) |>
+  # names -> display labels (harmless if they already are display labels)
+  mutate(Species = as.character(Species),
+         Species = ifelse(Species %in% names(label_map), label_map[Species], Species))
+
+# ============================================================
+# Function to extract catches from a simulation
+# ============================================================
+trimYield <- function(sim) {
+  plotYieldGear(sim, return_data = TRUE) |>
+    filter(!grepl("seal", Gear, ignore.case = TRUE)) |>   # seals are not fishery catch
+    filter(!Species %in% c("Sand Lance", "Capelin", "Longhorn Sculpin")) |>
+    group_by(Year, Species) |>
+    summarise(Yield = sum(Yield), .groups = "drop")
+}
+
+# ============================================================
+# Extract catches from the factual simulations
+# ============================================================
+sim_catches2 <- lapply(sims_with_fishing, trimYield)
+for (i in seq_along(sim_catches2)) sim_catches2[[i]]$sim <- i
+df_sim_catch2 <- do.call(rbind, sim_catches2)
+
+# same names as the observations, and only the years we have observations for
+df_sim_catch2 <- df_sim_catch2 |>
+  mutate(Species = as.character(Species),
+         Species = ifelse(Species %in% names(label_map), label_map[Species], Species)) |>
+  filter(Year >= min(yield_ts$Year), Year <= max(yield_ts$Year))
+
+# Stop here with a clear message if nothing came through
+print(nrow(df_sim_catch2))
+stopifnot("factual catch table is empty: check gear names and years" = nrow(df_sim_catch2) > 0)
+
+# ============================================================
+# Factual summaries
+# ============================================================
+sim_mean2_c  <- df_sim_catch2 |> group_by(Species, Year) |>
+                summarise(Yield = median(Yield), .groups = "drop")
+sim_lower2_c <- df_sim_catch2 |> group_by(Species, Year) |>
+                summarise(Yield = min(Yield), .groups = "drop")
+sim_upper2_c <- df_sim_catch2 |> group_by(Species, Year) |>
+                summarise(Yield = max(Yield), .groups = "drop")
+
+# ============================================================
+# Create scenario data frames
+# ============================================================
+sim2_c <- data.frame(
+  Species   = sim_mean2_c$Species,
+  Year      = sim_mean2_c$Year,
+  sim_mean  = sim_mean2_c$Yield,
+  sim_lower = sim_lower2_c$Yield,
+  sim_upper = sim_upper2_c$Yield,
+  scen      = "Factual (with fishing)")
+
+# No fishing = no catch: zero in every species and year
+sim1_c <- sim2_c
+sim1_c$sim_mean  <- 0
+sim1_c$sim_lower <- 0
+sim1_c$sim_upper <- 0
+sim1_c$scen      <- "Counterfactual (without fishing)"
+
+# ============================================================
+# Combine scenarios
+# ============================================================
+time_series_c <- rbind(sim1_c, sim2_c)
+
+# Species in the plot, in the order shown
+species_order <- c("Atlantic Cod", "Haddock", "White Hake", "Red Hake", "Silver Hake",
+                   "Pollock", "Redfish Unseparated", "American Plaice",
+                   "Yellowtail Flounder", "Witch Flounder", "Atlantic Herring",
+                   "Thorny Skate", "Winter Skate", "Spiny Dogfish", "Monkfish",
+                   "Atlantic Halibut")
+
+time_series_c$Species <- factor(time_series_c$Species, levels = species_order)
+time_series_c$scen    <- factor(time_series_c$scen,
+                                levels = c("Counterfactual (without fishing)",
+                                           "Factual (with fishing)"))
+yield_obs <- yield_ts |> filter(Yield_Obs > 0)
+yield_obs$Species <- factor(yield_obs$Species, levels = species_order)
+
+# ============================================================
+# Plot
+# ============================================================
+yield_plot <- ggplot(time_series_c,
+    aes(x = Year, colour = scen, fill = scen)) +
+  facet_wrap(~Species, scales = "free_y", ncol = 4,
+             labeller = label_wrap_gen(width = 14)) +
+  geom_ribbon(aes(ymin = sim_lower/1e9, ymax = sim_upper/1e9), alpha = 0.3, colour = NA) +
+  geom_line(aes(y = sim_mean/1e9)) +
+  geom_point(data = yield_obs, aes(x = Year, y = Yield_Obs/1e9),
+             inherit.aes = FALSE, colour = "black", size = 0.3) +
+  scale_colour_manual(name = NULL,
+    values = c("Counterfactual (without fishing)" = "#4575B4",
+               "Factual (with fishing)"            = "#D73027")) +
+  scale_fill_manual(name = NULL,
+    values = c("Counterfactual (without fishing)" = "#4575B4",
+               "Factual (with fishing)"            = "#D73027")) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 3)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 3),
+                     labels = scales::label_number()) +
+  labs(y = "Catches (kt)", x = "Year") +
+  geom_vline(xintercept = 1981, linetype = "dashed", color = "black") +
+  theme_pubr() +
+  theme(
+    legend.position  = "bottom",
+    legend.text      = element_text(face = "bold", size = 12),
+    axis.title.x     = element_text(face = "bold"),
+    axis.title.y     = element_text(face = "bold"),
+    axis.text.x      = element_text(face = "bold", size = 9),
+    axis.text.y      = element_text(face = "bold", size = 9),
+    strip.text       = element_text(face = "bold", size = 10),
+    panel.grid.minor = element_blank(),
+    panel.border     = element_rect(fill = NA, colour = "black", linewidth = 0.8))
+
+# ggsave(filename = "Ess_Fishmip_data/yield_plot.jpeg", plot = yield_plot,
+#        width = 13, height = 8.5, units = "in", dpi = 400)
+
+yield_plot
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+title: "FishMIP outputs: with and without fishing"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(mizer)
+```
+
+```{r project-setup}
+# ---- Project folder ----
+# Change base_dir if the project moves. root.dir makes every later chunk (and
+# knitting) run from this folder, wherever this Rmd file is saved.
+base_dir <- "/Users/ezekieladekoya/Mac/Dropbox/Desktop/Fishmip_ESS"
+stopifnot(dir.exists(base_dir))
+knitr::opts_knit$set(root.dir = base_dir)
+setwd(base_dir)
+message("Working directory: ", getwd())
+
+dir.create("Fishmip_output", showWarnings = FALSE)
+
+# ---- Mizer objects: both ensembles must be in memory ----
+stopifnot(exists("params"), exists("sims_with_fishing"), exists("sims_with_no_fishing"))
+
+# ---- Constants ----
+area_m2   <- 146360555008           # m^2
+years_out <- 1961:2010
+
+# ---- Scenarios ----
+# Order matters: "Without fishing" is listed first so it sits first in legends.
+scen_list   <- list("Without fishing" = sims_with_no_fishing,
+                    "With fishing"    = sims_with_fishing)
+scen_levels <- names(scen_list)
+scen_cols   <- c("Without fishing" = "#4575B4", "With fishing" = "#D73027")
+
+# Tag used in the FishMIP file names (replaces "histsoc"). Rename the
+# no-fishing tag to whatever your protocol calls it.
+scen_tag    <- c("Without fishing" = "nat", "With fishing" = "histsoc")
+# Each scenario is saved in its own folder
+out_dir <- c("Without fishing" = "Fishmip_output/without_fishing",
+             "With fishing"    = "Fishmip_output/with_fishing")
+for (d in out_dir) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+fish_prefix <- paste0(out_dir, "/mizer_gfdl-mom6-cobalt2_obsclim_")
+names(fish_prefix) <- names(out_dir)
+
+# Mizer has no pelagic flag, so pelagic species are chosen by hand
+# (Sand Lance is borderline; some classify it as demersal)
+pelagic  <- c("Atlantic Herring", "Capelin", "Sand Lance")
+all_spp  <- params@species_params$species
+demersal <- setdiff(all_spp, pelagic)
+
+# ---- Gears: catch excludes the seal gear (seals act in the model but are not
+# part of the fishery catch) ----
+gear_names    <- dimnames(getYieldGear(sims_with_fishing[[1]]))[[2]]
+fishing_gears <- gear_names[!grepl("seal", gear_names, ignore.case = TRUE)]
+print(gear_names)
+print(fishing_gears)      # eyeball: should be the fishing gears only
+
+# ---- Survey data ----
+biomass_ts <- readRDS(file.path("Ess_Fishmip_data", "biomass_ts.RDS"))
+stopifnot(all(pelagic %in% unique(as.character(biomass_ts$Species))))
+```
+
+## Annual biomass and catch for every simulation (computed once)
+```{r annual-tables}
+# For each scenario and each simulation: annual mean (over months) of biomass
+# above each species' cutoff, and of yield summed over fishing gears, per species.
+# Everything below is built from these two tables.
+bio_list <- list()
+yld_list <- list()
+
+for (sc in scen_levels) {
+  for (k in seq_along(scen_list[[sc]])) {
+    s <- scen_list[[sc]][[k]]
+    if (is.null(s)) next
+
+    # biomass, g: time x species -> annual mean, year x species
+    b  <- getBiomass(s, min_w = species_params(s@params)$biomass_cutoff)
+    tb <- floor(as.numeric(rownames(b)))
+    ba <- rowsum(b, tb) / as.vector(table(tb))
+    ba <- ba[rownames(ba) %in% years_out, , drop = FALSE]
+    bio_list[[length(bio_list) + 1]] <- data.frame(
+      scen = sc, sim = k,
+      Year = as.numeric(rownames(ba))[row(ba)],
+      Species = colnames(ba)[col(ba)],
+      value = as.vector(ba))
+
+    # yield, g/year: time x gear x species -> sum fishing gears -> annual mean
+    y  <- getYieldGear(s)
+    y  <- apply(y[, fishing_gears, , drop = FALSE], c(1, 3), sum)   # time x species
+    ty <- floor(as.numeric(rownames(y)))
+    ya <- rowsum(y, ty) / as.vector(table(ty))
+    ya <- ya[rownames(ya) %in% years_out, , drop = FALSE]
+    yld_list[[length(yld_list) + 1]] <- data.frame(
+      scen = sc, sim = k,
+      Year = as.numeric(rownames(ya))[row(ya)],
+      Species = colnames(ya)[col(ya)],
+      value = as.vector(ya))
+  }
+}
+
+bio_ann <- bind_rows(bio_list)
+yld_ann <- bind_rows(yld_list)
+rm(bio_list, yld_list)
+
+# members per scenario that made it through
+bio_ann |> distinct(scen, sim) |> count(scen)
+```
+
+## 1. Total consumer biomass (tcb)
+```{r tcb}
+# Optional: drop species from the survey total (e.g. "Sand Lance", whose survey
+# estimates look implausibly large). Leave as character(0) to keep everything.
+obs_exclude <- character(0)
+
+# sum species within each sim, then median / min / max across sims (g -> g m-2)
+tcb <- bio_ann |>
+  group_by(scen, sim, Year) |>
+  summarise(value = sum(value), .groups = "drop") |>
+  group_by(scen, Year) |>
+  summarise(sim_median = median(value), sim_lower = min(value),
+            sim_upper = max(value), .groups = "drop") |>
+  mutate(across(c(sim_median, sim_lower, sim_upper), ~ .x / area_m2),
+         scen = factor(scen, levels = scen_levels))
+
+# observed survey total (assumes grams)
+obs_tcb <- biomass_ts |>
+  filter(!Species %in% obs_exclude) |>
+  group_by(Year) |>
+  summarise(Biomass = sum(Biomass, na.rm = TRUE), .groups = "drop") |>
+  filter(Biomass > 0, Year %in% years_out) |>
+  transmute(Year, value = Biomass / area_m2)
+
+# export one file per scenario
+for (sc in scen_levels) {
+  out <- tcb |> filter(scen == sc)
+  out <- data.frame(Year = out$Year, "tcb.gm-2" = out$sim_median, check.names = FALSE)
+  write.csv(out, paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_tcb_ESS_Yearly_1961_2010.csv"),
+            row.names = FALSE)
+}
+
+ggplot(tcb, aes(x = Year, colour = scen, fill = scen)) +
+  geom_ribbon(aes(ymin = sim_lower, ymax = sim_upper), alpha = 0.3, colour = NA) +
+  geom_line(aes(y = sim_median), linewidth = 0.8) +
+  geom_point(data = obs_tcb, aes(x = Year, y = value, shape = "Survey"),
+             inherit.aes = FALSE, colour = "black", size = 1.8) +
+  scale_colour_manual(name = NULL, values = scen_cols) +
+  scale_fill_manual(name = NULL, values = scen_cols) +
+  scale_shape_manual(name = NULL, values = 16) +
+  labs(x = "Year", y = expression("Total consumer biomass density (g m"^-2*")"),
+       title = "Simulated total consumer biomass vs observations, 1961-2010") +
+  theme_bw()
+
+# scale check on the factual run: ~0 = consistent; ~+/-3 or 6 = units problem
+chk <- inner_join(tcb |> filter(scen == "With fishing") |> select(Year, sim = sim_median),
+                  obs_tcb |> select(Year, obs = value), by = "Year")
+message("tcb log10(median obs/sim) = ",
+        round(log10(median(chk$obs / chk$sim, na.rm = TRUE)), 2),
+        "  (", nrow(chk), " overlapping years)")
+```
+
+## 2. Total consumer biomass in log10 weight bins (tcblog10)
+```{r tcblog10}
+# NOTE: the first bin starts at log10(w) = 0 (1 g), so weight classes below 1 g
+# are excluded. The bins therefore sum to slightly less than tcb. Change the
+# first edge to -Inf (and add a bin name) if you want to include them.
+bin_edges <- c(0, 1, 2, 3, 4, 5, Inf)   # log10(g)
+bin_names <- c("1to10g.gm-2", "10to100g.gm-2", "100gto1kg.gm-2",
+               "1to10kg.gm-2", "10to100kg.gm-2", "GT100kg.gm-2")
+
+res_tcblog10 <- list()
+for (sc in scen_levels) {
+  sim  <- scen_list[[sc]][[1]]                    # one simulation
+  w    <- sim@params@w
+  dw   <- sim@params@dw
+  n    <- N(sim)                                  # time x species x weight
+  tt   <- as.numeric(dimnames(n)[[1]])
+  keep <- floor(tt) %in% years_out
+
+  bin   <- cut(log10(w), bin_edges, labels = bin_names, right = FALSE)
+  n_all <- apply(n[keep, , , drop = FALSE], c(1, 3), sum)   # sum species -> time x weight
+  bio_w <- sweep(n_all, 2, w * dw, "*")                     # grams per weight class
+
+  out <- sapply(bin_names, function(b)
+    rowSums(bio_w[, which(bin == b), drop = FALSE]) / area_m2)   # g m-2, time x bin
+
+  res_tcblog10[[sc]] <- data.frame(Year = tt[keep], out, check.names = FALSE, row.names = NULL)
+  print(c(sc, nrow(res_tcblog10[[sc]])))          # expect 600 (monthly)
+
+  write.csv(res_tcblog10[[sc]],
+            paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_tcblog10_ESS_Yearly_1961_2010.csv"),
+            row.names = FALSE)
+}
+```
+
+## 3. Total pelagic biomass (tpb)
+```{r tpb}
+tpb <- bio_ann |>
+  filter(Species %in% pelagic) |>
+  group_by(scen, sim, Year) |>
+  summarise(value = sum(value), .groups = "drop") |>
+  group_by(scen, Year) |>
+  summarise(sim_median = median(value), sim_lower = min(value),
+            sim_upper = max(value), .groups = "drop") |>
+  mutate(across(c(sim_median, sim_lower, sim_upper), ~ .x / area_m2),
+         scen = factor(scen, levels = scen_levels))
+
+for (sc in scen_levels) {
+  out <- tpb |> filter(scen == sc)
+  out <- data.frame(Year = out$Year, "tpb.gm-2" = out$sim_median, check.names = FALSE)
+  write.csv(out, paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_tpb_ESS_Yearly_1961_2010.csv"),
+            row.names = FALSE)
+}
+```
+
+### Observed pelagic biomass
+```{r tpb-obs}
+# Sand Lance (and possibly Herring) survey values look implausibly high.
+# Switch to c("Atlantic Herring", "Capelin") to test.
+obs_species <- pelagic
+min_sp      <- length(obs_species)   # years need this many non-zero species
+
+# Zeros are treated as "not surveyed / not caught"
+pel_obs_all <- biomass_ts |>
+  filter(Species %in% obs_species) |>
+  mutate(Biomass = ifelse(Biomass == 0, NA, Biomass)) |>
+  group_by(Year) |>
+  summarise(n_sp = sum(!is.na(Biomass)),
+            Biomass = sum(Biomass, na.rm = TRUE), .groups = "drop") |>
+  filter(Year %in% years_out)
+
+pel_obs_all |> filter(n_sp < min_sp) |> print(n = Inf)   # years that get dropped
+
+obs_tpb <- pel_obs_all |>
+  filter(n_sp >= min_sp) |>
+  transmute(Year, value = Biomass / area_m2)             # assumes grams
+
+ggplot(tpb, aes(x = Year, colour = scen, fill = scen)) +
+  geom_ribbon(aes(ymin = sim_lower, ymax = sim_upper), alpha = 0.3, colour = NA) +
+  geom_line(aes(y = sim_median), linewidth = 0.8) +
+  geom_point(data = obs_tpb, aes(x = Year, y = value, shape = "Survey"),
+             inherit.aes = FALSE, colour = "black", size = 1.8) +
+  scale_colour_manual(name = NULL, values = scen_cols) +
+  scale_fill_manual(name = NULL, values = scen_cols) +
+  scale_shape_manual(name = NULL, values = 16) +
+  labs(x = "Year", y = expression("Total pelagic biomass density (g m"^-2*")"),
+       title = "Simulated total pelagic biomass vs observations, 1961-2010") +
+  theme_bw()
+
+chk <- inner_join(tpb |> filter(scen == "With fishing") |> select(Year, sim = sim_median),
+                  obs_tpb |> select(Year, obs = value), by = "Year")
+message("tpb log10(median obs/sim) = ",
+        round(log10(median(chk$obs / chk$sim, na.rm = TRUE)), 2),
+        "  (", nrow(chk), " overlapping years)")
+```
+
+## 4. Total demersal biomass (tdb)
+```{r tdb}
+tdb <- bio_ann |>
+  filter(Species %in% demersal) |>
+  group_by(scen, sim, Year) |>
+  summarise(value = sum(value), .groups = "drop") |>
+  group_by(scen, Year) |>
+  summarise(sim_median = median(value), sim_lower = min(value),
+            sim_upper = max(value), .groups = "drop") |>
+  mutate(across(c(sim_median, sim_lower, sim_upper), ~ .x / area_m2),
+         scen = factor(scen, levels = scen_levels))
+
+for (sc in scen_levels) {
+  out <- tdb |> filter(scen == sc)
+  out <- data.frame(Year = out$Year, "tdb.gm-2" = out$sim_median, check.names = FALSE)
+  write.csv(out, paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_tdb_ESS_Yearly_1961_2010.csv"),
+            row.names = FALSE)
+}
+```
+
+### Observed demersal biomass
+```{r tdb-obs}
+obs_tdb <- biomass_ts |>
+  filter(!Species %in% pelagic) |>
+  group_by(Year) |>
+  summarise(Biomass = sum(Biomass, na.rm = TRUE), .groups = "drop") |>
+  filter(Biomass > 0, Year %in% years_out) |>
+  transmute(Year, value = Biomass / area_m2)             # assumes grams
+
+ggplot(tdb, aes(x = Year, colour = scen, fill = scen)) +
+  geom_ribbon(aes(ymin = sim_lower, ymax = sim_upper), alpha = 0.3, colour = NA) +
+  geom_line(aes(y = sim_median), linewidth = 0.8) +
+  geom_point(data = obs_tdb, aes(x = Year, y = value, shape = "Survey"),
+             inherit.aes = FALSE, colour = "black", size = 1.8) +
+  scale_colour_manual(name = NULL, values = scen_cols) +
+  scale_fill_manual(name = NULL, values = scen_cols) +
+  scale_shape_manual(name = NULL, values = 16) +
+  labs(x = "Year", y = expression("Total demersal biomass density (g m"^-2*")"),
+       title = "Simulated total demersal biomass vs observations, 1961-2010") +
+  theme_bw()
+
+chk <- inner_join(tdb |> filter(scen == "With fishing") |> select(Year, sim = sim_median),
+                  obs_tdb |> select(Year, obs = value), by = "Year")
+message("tdb log10(median obs/sim) = ",
+        round(log10(median(chk$obs / chk$sim, na.rm = TRUE)), 2),
+        "  (", nrow(chk), " overlapping years)")
+```
+
+## 5. Total catch (tc)
+
+Without fishing every gear has zero effort, so the "Without fishing" catch is
+zero by construction; it is exported and plotted for completeness.
+```{r tc}
+tc <- yld_ann |>
+  group_by(scen, sim, Year) |>
+  summarise(value = sum(value), .groups = "drop") |>
+  group_by(scen, Year) |>
+  summarise(sim_median = median(value), sim_lower = min(value),
+            sim_upper = max(value), .groups = "drop") |>
+  mutate(across(c(sim_median, sim_lower, sim_upper), ~ .x / area_m2),
+         scen = factor(scen, levels = scen_levels))
+
+for (sc in scen_levels) {
+  out <- tc |> filter(scen == sc)
+  out <- data.frame(Year = out$Year, "tc.gm-2" = out$sim_median, check.names = FALSE)
+  write.csv(out, paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_tc_ESS_Yearly_1961_2010.csv"),
+            row.names = FALSE)
+}
+```
+
+### Observed catch
+```{r tc-obs}
+# read in observed catch data
+yield_ts <- readRDS(file.path("Ess_Fishmip_data", "yield_ts.RDS")) |>
+  rename(Yield_Obs = Yield) |>
+  filter(!Species %in% c("Sand Lance", "Capelin", "Longhorn Sculpin")) |>
+  mutate(Species = factor(Species, levels = unique(Species))) |>
+  arrange(match(Species, levels(Species)), Year)
+
+# CHECK THE UNITS: the values (~1e10-1e11) look like grams already.
+# 1 = data already in grams; 1e6 = data in tonnes; 1e3 = data in kg.
+# The scale check at the bottom should give a value near 0 when this is right
+# (about 6 means you need 1e6, about 3 means you need 1e3).
+catch_to_g <- 1
+
+obs_tc <- yield_ts |>
+  group_by(Year) |>
+  summarise(Catch = sum(Yield_Obs, na.rm = TRUE) * catch_to_g, .groups = "drop") |>
+  filter(Year %in% years_out) |>
+  transmute(Year, value = Catch / area_m2)
+
+ggplot(tc, aes(x = Year, colour = scen, fill = scen)) +
+  geom_ribbon(aes(ymin = sim_lower, ymax = sim_upper), alpha = 0.3, colour = NA) +
+  geom_line(aes(y = sim_median), linewidth = 0.8) +
+  geom_point(data = obs_tc, aes(x = Year, y = value, shape = "Observed"),
+             inherit.aes = FALSE, colour = "black", size = 1.8) +
+  scale_colour_manual(name = NULL, values = scen_cols) +
+  scale_fill_manual(name = NULL, values = scen_cols) +
+  scale_shape_manual(name = NULL, values = 16) +
+  labs(x = "Year", y = expression("Total catch (g m"^-2*" year"^-1*")"),
+       title = "Simulated total catch vs observations") +
+  theme_bw()
+
+chk <- inner_join(tc |> filter(scen == "With fishing") |> select(Year, sim = sim_median),
+                  obs_tc |> select(Year, obs = value), by = "Year")
+message("tc log10(median obs/sim) = ",
+        round(log10(median(chk$obs / chk$sim, na.rm = TRUE)), 2),
+        "  (", nrow(chk), " overlapping years)")
+```
+
+## 6. Catch in log10 weight bins (tclog10)
+```{r tclog10}
+# Fishing mortality summed over the fishing gears only (seal gear excluded),
+# so it matches the yield used everywhere else. Note this holds a
+# time x gear x species x weight array for one sim at a time.
+res_tclog10 <- list()
+for (sc in scen_levels) {
+  sim  <- scen_list[[sc]][[1]]
+  w    <- sim@params@w
+  dw   <- sim@params@dw
+  n    <- N(sim)                                  # time x species x weight
+  f    <- getFMortGear(sim)                       # time x gear x species x weight, 1/yr
+  f    <- apply(f[, fishing_gears, , , drop = FALSE], c(1, 3, 4), sum)
+  stopifnot(identical(dim(n), dim(f)))
+
+  tt   <- as.numeric(dimnames(n)[[1]])
+  keep <- floor(tt) %in% years_out
+
+  catch <- n[keep, , , drop = FALSE] * f[keep, , , drop = FALSE]
+  c_tw  <- apply(catch, c(1, 3), sum)             # sum species -> time x weight
+  c_w   <- sweep(c_tw, 2, w * dw, "*")            # g/yr per weight class
+
+  bin <- cut(log10(w), bin_edges, labels = bin_names, right = FALSE)
+  out <- sapply(bin_names, function(b)
+    rowSums(c_w[, which(bin == b), drop = FALSE]) / area_m2)   # g m-2 yr-1
+
+  res_tclog10[[sc]] <- data.frame(Year = tt[keep], out, check.names = FALSE, row.names = NULL)
+  print(c(sc, nrow(res_tclog10[[sc]])))           # expect 600
+
+  # No header and no Year column; row order is the month
+  write.table(res_tclog10[[sc]][, -1],
+              paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_tclog10_ESS_Yearly_1961_2010.csv"),
+              sep = ",", row.names = FALSE, col.names = FALSE)
+}
+```
+
+## 7. Total pelagic and demersal catch (tpc, tdc)
+```{r tpc-tdc}
+# ---- pelagic ----
+tpc <- yld_ann |>
+  filter(Species %in% pelagic) |>
+  group_by(scen, sim, Year) |>
+  summarise(value = sum(value), .groups = "drop") |>
+  group_by(scen, Year) |>
+  summarise(sim_median = median(value), sim_lower = min(value),
+            sim_upper = max(value), .groups = "drop") |>
+  mutate(across(c(sim_median, sim_lower, sim_upper), ~ .x / area_m2),
+         scen = factor(scen, levels = scen_levels))
+
+for (sc in scen_levels) {
+  out <- tpc |> filter(scen == sc)
+  out <- data.frame(Year = out$Year, "tpc.gm-2" = out$sim_median, check.names = FALSE)
+  write.csv(out, paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_tpc_ESS_Yearly_1961_2010.csv"),
+            row.names = FALSE)
+}
+
+# observed: only works if catch_ts columns are named exactly like the model species
+cols <- intersect(pelagic, setdiff(names(catch_ts), "Year"))
+if (length(cols) < length(pelagic))
+  message("Catch data has no column for: ", paste(setdiff(pelagic, cols), collapse = ", "))
+obs_tpc <- catch_ts |>
+  mutate(Catch = rowSums(across(all_of(cols)), na.rm = TRUE) * catch_to_g) |>
+  filter(Year %in% years_out) |>
+  transmute(Year, value = Catch / area_m2)
+
+ggplot(tpc, aes(x = Year, colour = scen, fill = scen)) +
+  geom_ribbon(aes(ymin = sim_lower, ymax = sim_upper), alpha = 0.3, colour = NA) +
+  geom_line(aes(y = sim_median), linewidth = 0.8) +
+  geom_point(data = obs_tpc, aes(x = Year, y = value, shape = "Survey"),
+             inherit.aes = FALSE, colour = "black", size = 1.8) +
+  scale_colour_manual(name = NULL, values = scen_cols) +
+  scale_fill_manual(name = NULL, values = scen_cols) +
+  scale_shape_manual(name = NULL, values = 16) +
+  labs(x = "Year", y = expression("Total pelagic catch (g m"^-2*" year"^-1*")"),
+       title = "Simulated pelagic catch vs observations, 1961-2010") +
+  theme_bw()
+
+chk <- inner_join(tpc |> filter(scen == "With fishing") |> select(Year, sim = sim_median),
+                  obs_tpc |> select(Year, obs = value), by = "Year")
+message("tpc log10(median obs/sim) = ",
+        round(log10(median(chk$obs / chk$sim, na.rm = TRUE)), 2),
+        "  (", nrow(chk), " overlapping years)")
+
+# ---- demersal ----
+tdc <- yld_ann |>
+  filter(Species %in% demersal) |>
+  group_by(scen, sim, Year) |>
+  summarise(value = sum(value), .groups = "drop") |>
+  group_by(scen, Year) |>
+  summarise(sim_median = median(value), sim_lower = min(value),
+            sim_upper = max(value), .groups = "drop") |>
+  mutate(across(c(sim_median, sim_lower, sim_upper), ~ .x / area_m2),
+         scen = factor(scen, levels = scen_levels))
+
+for (sc in scen_levels) {
+  out <- tdc |> filter(scen == sc)
+  out <- data.frame(Year = out$Year, "tdc.gm-2" = out$sim_median, check.names = FALSE)
+  write.csv(out, paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_tdc_ESS_Yearly_1961_2010.csv"),
+            row.names = FALSE)
+}
+
+cols <- intersect(demersal, setdiff(names(catch_ts), "Year"))
+if (length(cols) < length(demersal))
+  message("Catch data has no column for: ", paste(setdiff(demersal, cols), collapse = ", "))
+obs_tdc <- catch_ts |>
+  mutate(Catch = rowSums(across(all_of(cols)), na.rm = TRUE) * catch_to_g) |>
+  filter(Year %in% years_out) |>
+  transmute(Year, value = Catch / area_m2)
+
+ggplot(tdc, aes(x = Year, colour = scen, fill = scen)) +
+  geom_ribbon(aes(ymin = sim_lower, ymax = sim_upper), alpha = 0.3, colour = NA) +
+  geom_line(aes(y = sim_median), linewidth = 0.8) +
+  geom_point(data = obs_tdc, aes(x = Year, y = value, shape = "Survey"),
+             inherit.aes = FALSE, colour = "black", size = 1.8) +
+  scale_colour_manual(name = NULL, values = scen_cols) +
+  scale_fill_manual(name = NULL, values = scen_cols) +
+  scale_shape_manual(name = NULL, values = 16) +
+  labs(x = "Year", y = expression("Total demersal catch (g m"^-2*" year"^-1*")"),
+       title = "Simulated demersal catch vs observations, 1961-2010") +
+  theme_bw()
+
+chk <- inner_join(tdc |> filter(scen == "With fishing") |> select(Year, sim = sim_median),
+                  obs_tdc |> select(Year, obs = value), by = "Year")
+message("tdc log10(median obs/sim) = ",
+        round(log10(median(chk$obs / chk$sim, na.rm = TRUE)), 2),
+        "  (", nrow(chk), " overlapping years)")
+```
+
+## 8. Size-class groups (by maximum length, L_inf)
+```{r size-groups}
+sp <- params@species_params
+sp$l_max <- (sp$w_max / sp$a)^(1 / sp$b)     # cm, from W = a L^b
+stopifnot(!anyNA(sp$l_max))
+is_pel <- sp$species %in% pelagic
+
+groups <- list(
+  pel_small  = sp$species[ is_pel & sp$l_max <  30],
+  pel_medium = sp$species[ is_pel & sp$l_max >= 30 & sp$l_max < 90],
+  pel_large  = sp$species[ is_pel & sp$l_max >= 90],
+  dem_small  = sp$species[!is_pel & sp$l_max <  30],
+  dem_medium = sp$species[!is_pel & sp$l_max >= 30 & sp$l_max < 90],
+  dem_large  = sp$species[!is_pel & sp$l_max >= 90]
+)
+print(groups)                                          # eyeball the assignments
+stopifnot(length(unlist(groups)) == nrow(sp))          # every species in exactly one group
+
+classes <- data.frame(
+  code  = c("p30cm", "p30to90cm", "p90cm", "d30cm", "d30to90cm", "d90cm"),
+  group = c("pel_small", "pel_medium", "pel_large",
+            "dem_small", "dem_medium", "dem_large"),
+  title = c("small pelagics (L_inf < 30 cm)",
+            "medium pelagics (L_inf 30-90 cm)",
+            "large pelagics (L_inf >= 90 cm)",
+            "small demersals (L_inf < 30 cm)",
+            "medium demersals (L_inf 30-90 cm)",
+            "large demersals (L_inf >= 90 cm)"),
+  stringsAsFactors = FALSE
+)
+```
+
+### Biomass density by size class (bp30cm ... bd90cm)
+```{r size-biomass}
+for (i in seq_len(nrow(classes))) {
+  code <- classes$code[i]
+  spp  <- groups[[classes$group[i]]]
+
+  if (length(spp) == 0) {
+    message("Group '", classes$group[i], "' has no species: b", code,
+            " will be written as zeros.")
+    res <- expand.grid(scen = scen_levels, Year = years_out, stringsAsFactors = FALSE) |>
+      mutate(sim_median = 0, sim_lower = 0, sim_upper = 0,
+             scen = factor(scen, levels = scen_levels))
+  } else {
+    res <- bio_ann |>
+      filter(Species %in% spp) |>
+      group_by(scen, sim, Year) |>
+      summarise(value = sum(value), .groups = "drop") |>
+      group_by(scen, Year) |>
+      summarise(sim_median = median(value), sim_lower = min(value),
+                sim_upper = max(value), .groups = "drop") |>
+      mutate(across(c(sim_median, sim_lower, sim_upper), ~ .x / area_m2),
+             scen = factor(scen, levels = scen_levels))
+  }
+
+  for (sc in scen_levels) {
+    out <- res |> filter(scen == sc)
+    out <- data.frame(Year = out$Year, out$sim_median)
+    names(out) <- c("Year", paste0("b", code, ".gm-2"))
+    write.csv(out, paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_b", code,
+                          "_ESS_Yearly_1961_2010.csv"), row.names = FALSE)
+  }
+
+  # observed: years where all species in the class have non-zero survey values
+  obs <- NULL
+  if (length(spp) > 0) {
+    obs <- biomass_ts |>
+      filter(Species %in% spp) |>
+      mutate(Biomass = ifelse(Biomass == 0, NA, Biomass)) |>
+      group_by(Year) |>
+      summarise(n_sp = sum(!is.na(Biomass)),
+                Biomass = sum(Biomass, na.rm = TRUE), .groups = "drop") |>
+      filter(n_sp >= length(spp), Year %in% years_out) |>
+      transmute(Year, value = Biomass / area_m2)
+  }
+
+  p <- ggplot(res, aes(x = Year, colour = scen, fill = scen)) +
+    geom_ribbon(aes(ymin = sim_lower, ymax = sim_upper), alpha = 0.3, colour = NA) +
+    geom_line(aes(y = sim_median), linewidth = 0.8) +
+    scale_colour_manual(name = NULL, values = scen_cols) +
+    scale_fill_manual(name = NULL, values = scen_cols) +
+    labs(x = "Year", y = expression("Biomass density (g m"^-2*")"),
+         title = paste("Simulated biomass of", classes$title[i],
+                       "vs observations, 1961-2010")) +
+    theme_bw()
+  if (!is.null(obs) && nrow(obs) > 0) {
+    p <- p +
+      geom_point(data = obs, aes(x = Year, y = value, shape = "Survey"),
+                 inherit.aes = FALSE, colour = "black", size = 1.8) +
+      scale_shape_manual(name = NULL, values = 16)
+
+    chk <- inner_join(res |> filter(scen == "With fishing") |> select(Year, sim = sim_median),
+                      obs |> select(Year, obs = value), by = "Year")
+    message("b", code, " log10(median obs/sim) = ",
+            round(log10(median(chk$obs / chk$sim, na.rm = TRUE)), 2),
+            "  (", nrow(chk), " overlapping years)")
+  }
+  print(p)
+}
+```
+
+### Catch density by size class (cp30cm ... cd90cm)
+```{r size-catch}
+for (i in seq_len(nrow(classes))) {
+  code <- classes$code[i]
+  spp  <- groups[[classes$group[i]]]
+
+  if (length(spp) == 0) {
+    message("Group '", classes$group[i], "' has no species: c", code,
+            " will be written as zeros.")
+    res <- expand.grid(scen = scen_levels, Year = years_out, stringsAsFactors = FALSE) |>
+      mutate(sim_median = 0, sim_lower = 0, sim_upper = 0,
+             scen = factor(scen, levels = scen_levels))
+  } else {
+    res <- yld_ann |>
+      filter(Species %in% spp) |>
+      group_by(scen, sim, Year) |>
+      summarise(value = sum(value), .groups = "drop") |>
+      group_by(scen, Year) |>
+      summarise(sim_median = median(value), sim_lower = min(value),
+                sim_upper = max(value), .groups = "drop") |>
+      mutate(across(c(sim_median, sim_lower, sim_upper), ~ .x / area_m2),
+             scen = factor(scen, levels = scen_levels))
+  }
+
+  for (sc in scen_levels) {
+    out <- res |> filter(scen == sc)
+    out <- data.frame(Year = out$Year, out$sim_median)
+    names(out) <- c("Year", paste0("c", code, ".gm-2"))
+    write.csv(out, paste0(fish_prefix[sc], scen_tag[sc], "_15arcmin_c", code,
+                          "_ESS_Yearly_1961_2010.csv"), row.names = FALSE)
+  }
+
+  # observed: only works if catch_ts columns are named exactly like the model species
+  obs <- NULL
+  cols <- intersect(spp, setdiff(names(catch_ts), "Year"))
+  if (length(cols) < length(spp))
+    message("Catch data has no column for: ", paste(setdiff(spp, cols), collapse = ", "))
+  if (length(cols) > 0) {
+    obs <- catch_ts |>
+      mutate(Catch = rowSums(across(all_of(cols)), na.rm = TRUE) * catch_to_g) |>
+      filter(Year %in% years_out) |>
+      transmute(Year, value = Catch / area_m2)
+  }
+
+  p <- ggplot(res, aes(x = Year, colour = scen, fill = scen)) +
+    geom_ribbon(aes(ymin = sim_lower, ymax = sim_upper), alpha = 0.3, colour = NA) +
+    geom_line(aes(y = sim_median), linewidth = 0.8) +
+    scale_colour_manual(name = NULL, values = scen_cols) +
+    scale_fill_manual(name = NULL, values = scen_cols) +
+    labs(x = "Year", y = expression("Catch density (g m"^-2*" year"^-1*")"),
+         title = paste("Simulated catch of", classes$title[i],
+                       "vs observations, 1961-2010")) +
+    theme_bw()
+  if (!is.null(obs) && nrow(obs) > 0) {
+    p <- p +
+      geom_point(data = obs, aes(x = Year, y = value, shape = "Survey"),
+                 inherit.aes = FALSE, colour = "black", size = 1.8) +
+      scale_shape_manual(name = NULL, values = 16)
+
+    chk <- inner_join(res |> filter(scen == "With fishing") |> select(Year, sim = sim_median),
+                      obs |> select(Year, obs = value), by = "Year")
+    message("c", code, " log10(median obs/sim) = ",
+            round(log10(median(chk$obs / chk$sim, na.rm = TRUE)), 2),
+            "  (", nrow(chk), " overlapping years)")
+  }
+  print(p)
+}
+```
+
+## 9. Check the output files
+```{r check-files}
+files <- list.files("Fishmip_output", pattern = "\\.csv$", full.names = TRUE,
+                    recursive = TRUE)
+data.frame(folder = basename(dirname(files)),
+           file   = basename(files),
+           rows   = sapply(files, function(f) length(readLines(f))),
+           row.names = NULL)
+```
+
+```{r}
+
+```
+

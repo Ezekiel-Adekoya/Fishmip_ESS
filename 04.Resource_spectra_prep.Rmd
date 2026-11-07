@@ -38,11 +38,11 @@ knitr::opts_knit$set(root.dir = dir)
 Cliamte Data from FISHMIP Observation-based climate related forcing (obsclim) outputs from the GFDL-MOM6-COBALT2 model.
 ```{r}
 
-SPECTRA_START <- "1961-01-01"
+SPECTRA_START <- "1861-01-01"
 SPECTRA_END   <- "2010-12-31"
 
 read_plankton <- function(v) {
-  read.csv(file.path("Ess_Fishmip_data", paste0("GFDL_obsclim_", v, "_1961_2010.csv"))) %>%
+  read.csv(file.path("Ess_Fishmip_data", paste0("GFDL_obsclim_", v, "_1861_2010.csv"))) %>%
     mutate(V1 = as.Date(V1, format = "%Y-%m-%d")) %>%
     filter(V1 >= as.Date(SPECTRA_START) & V1 <= as.Date(SPECTRA_END))
 }
@@ -52,6 +52,13 @@ GFDL_diaz   <- read_plankton("diaz")
 GFDL_zmicro <- read_plankton("micro")
 GFDL_zmeso  <- read_plankton("meso")
 GFDL_pico   <- read_plankton("pico")
+
+# Fail loudly if any series is the wrong length or its dates don't line up
+stopifnot(
+  nrow(GFDL_diat) == 150,
+  all(sapply(list(GFDL_diaz, GFDL_zmicro, GFDL_zmeso, GFDL_pico),
+             function(d) identical(d$V1, GFDL_diat$V1)))
+)
 
 # Guard against the length/misalignment problem from before
 stopifnot(
