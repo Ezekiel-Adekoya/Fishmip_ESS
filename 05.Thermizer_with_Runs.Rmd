@@ -758,9 +758,12 @@ library(mizer)
 
 ```{r project-setup}
 # ---- Project folder ----
-# Change base_dir if the project moves. root.dir makes every later chunk (and
-# knitting) run from this folder, wherever this Rmd file is saved.
-base_dir <- "/Users/ezekieladekoya/Mac/Dropbox/Desktop/Fishmip_ESS"
+# here() finds the project root from the .Rproj / .git marker, so this works on
+# any machine and whoever has the repo checked out. This used to be a hardcoded
+# path to one person's Dropbox folder, which made the whole export section stop
+# at the dir.exists() check for everybody else, even though every chunk before
+# it already used here().
+base_dir <- here::here()
 stopifnot(dir.exists(base_dir))
 knitr::opts_knit$set(root.dir = base_dir)
 setwd(base_dir)
@@ -1087,6 +1090,24 @@ yield_ts <- readRDS(file.path("Ess_Fishmip_data", "yield_ts.RDS")) |>
 # The scale check at the bottom should give a value near 0 when this is right
 # (about 6 means you need 1e6, about 3 means you need 1e3).
 catch_to_g <- 1
+
+# The pelagic, demersal and size-class catch sections further down all read a
+# table called catch_ts with one column per species, but nothing in this script
+# ever built it, so those sections stopped with "object 'catch_ts' not found".
+# It is the wide form of the same observed catch as yield_ts above, so it is
+# derived from yield_ts here rather than read from a separate file. That keeps
+# the per-group catch comparisons consistent with the total catch (tc), which
+# uses yield_ts directly. Sand Lance, Capelin and Longhorn Sculpin were dropped
+# from yield_ts above, so they have no column; the sections below already print
+# a message naming any species they cannot find.
+catch_ts <- yield_ts |>
+  select(Year, Species, Yield_Obs) |>
+  tidyr::pivot_wider(names_from = Species, values_from = Yield_Obs,
+                     values_fill = 0) |>
+  arrange(Year) |>
+  as.data.frame()
+stopifnot("Year" %in% names(catch_ts), ncol(catch_ts) > 1,
+          !anyDuplicated(catch_ts$Year))
 
 obs_tc <- yield_ts |>
   group_by(Year) |>

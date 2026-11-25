@@ -2,3 +2,7 @@
 *.nc
 Ess_Fishmip_data/
 .DS_Store
+
+# Rscript writes this in the project root on every run of 05 (unguarded print()
+# calls); it is not an output anyone needs to keep.
+Rplots.pdf
