@@ -108,16 +108,50 @@ zmicro_1961_2010 <- process_gfdl_vint(in_file("zmicro"),  "Zmicro", region_area_
 # =============================================================================
 # Plankton spin-up, 1861-1960: repeat the first n_cycle real years (1961-1970).
 #
-# Needs in the session:
-#   plankton_all : Year, val, variable (5 groups), 1961-2010
-#
 # 1861-1960 is constructed spin-up forcing, NOT data.
 # =============================================================================
 library(dplyr)
 library(ggplot2)
 library(lubridate)   # dmy()
 
+# ---- Stack the five groups into one long table --------------------------------
+# The processing chunk above returns one WIDE table per group: two columns,
+# Year and a value column named after the group (Diat, Diaz, Pico, Zmeso,
+# Zmicro). The spin-up below works on one group at a time, so the five tables
+# are stacked here into a single long table with a Year / val / variable
+# layout. This step used to be missing entirely, so the spin-up had nothing to
+# work on and the chunk failed at its first line.
+#
+# Note that `variable` ends up holding the short group names from the chunk
+# above, NOT the long names (Diatoms, Diazotrophs, ...). `file_label` at the
+# bottom of this chunk has to be keyed on these same short names.
+one_group_tables <- list(diat_1961_2010, diaz_1961_2010, pico_1961_2010,
+                         zmeso_1961_2010, zmicro_1961_2010)
+
+plankton_all <- bind_rows(lapply(one_group_tables, function(one_group) {
+  stopifnot(ncol(one_group) == 2, names(one_group)[1] == "Year")
+  group_name <- names(one_group)[2]
+  data.frame(Year     = one_group$Year,
+             val      = one_group[[2]],
+             variable = group_name)
+}))
+
+# Catch a mis-stacked or short table here rather than letting it surface as a
+# confusing failure in the spin-up below. Plankton biomass must be strictly
+# positive everywhere, so a zero or NA means something upstream went wrong.
+expected_rows <- length(one_group_tables) * 50   # five groups x 1961-2010
+stopifnot(
+  nrow(plankton_all) == expected_rows,
+  setequal(unique(plankton_all$variable),
+           c("Diat", "Diaz", "Pico", "Zmeso", "Zmicro")),
+  !anyNA(plankton_all$val),
+  all(plankton_all$val > 0)
+)
+
 # ---- Settings ----------------------------------------------------------------
+# n_cycle = 10 matches the effort spin-up in Effort_spin_1861_2010.csv, where
+# 1960 repeats 1970. NOTE 01.Temp_prep.Rmd uses n_cycle = 5, so the temperature
+# spin-up is on a different cycle from effort and plankton; 01 is the outlier.
 n_cycle    <- 10L                  # years repeated: 1961-1970
 spin_start <- 1861L
 spin_end   <- 1960L
@@ -165,13 +199,40 @@ ggsave(file.path(out_dir, "plankton_spinup_1861_2010.png"), p_plankton,
        width = 10, height = 8, dpi = 300)
 
 # ---- Save one V1/V2 file per group (the format the resource script reads) ----
-file_label <- c(Diatoms = "diat", Diazotrophs = "diaz", Picophytoplankton = "pico",
-                Mesozooplankton = "meso", Microzooplankton = "micro")
+# Maps the short group name used in `variable` to the lower-case tag that
+# appears in the output file name. The names on the left MUST match the group
+# names in `variable` exactly: they used to be the long forms (Diatoms,
+# Diazotrophs, ...), which matched nothing, so every filter below returned zero
+# rows and all five files were written out empty without any error. The
+# stopifnot immediately after is what makes that failure impossible to repeat.
+# 04.Resource_spectra_prep.Rmd reads these files by the right-hand tags and
+# requires 150 rows in each.
+file_label <- c(Diat = "diat", Diaz = "diaz", Pico = "pico",
+                Zmeso = "meso", Zmicro = "micro")
+stopifnot(setequal(names(file_label), unique(plankton_full$variable)))
 
-for (v in names(file_label)) {
-  d <- filter(plankton_full, variable == v)
-  write.csv(data.frame(V1 = dmy(paste0("01-JAN-", d$Year)), V2 = d$val),
-            file.path(out_dir, paste0("GFDL_obsclim_", file_label[[v]], "_1861_2010.csv")),
-            row.names = FALSE, quote = FALSE)
+first_real_data_year <- spin_end + 1    # 1961
+last_real_data_year  <- 2010
+
+for (group_name in names(file_label)) {
+  one_group_full_series <- filter(plankton_full, variable == group_name) %>%
+    arrange(Year)
+
+  # Every group must cover 1861-2010 with one row per year and no gaps.
+  stopifnot(
+    nrow(one_group_full_series) == length(spin_years) +
+      (last_real_data_year - first_real_data_year + 1),
+    identical(as.integer(one_group_full_series$Year),
+              spin_start:last_real_data_year)
+  )
+
+  # V1 / V2 column names with a 1 January date are the format the resource
+  # script expects; they are not meaningful names in themselves.
+  output_file <- file.path(out_dir, paste0("GFDL_obsclim_",
+                                          file_label[[group_name]],
+                                          "_1861_2010.csv"))
+  write.csv(data.frame(V1 = dmy(paste0("01-JAN-", one_group_full_series$Year)),
+                       V2 = one_group_full_series$val),
+            output_file, row.names = FALSE, quote = FALSE)
 }
 ```

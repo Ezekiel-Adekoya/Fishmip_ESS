@@ -94,11 +94,13 @@ library(tidyr)     # pivot_wider() for the year x depth output
 library(purrr)     # map2_dfr(): loop over depth folders and bind rows
 library(readr)     # write_csv()
 
+library(ggplot2)   # first used by the diagnostic plot chunks well before the
+                   # spin-up chunk, which used to be the only place loading it
+
 # Not used in this file (kept commented in case other chunks are added back):
 # library(terra)
 # library(lubridate)
 # library(ncdf4)
-# library(ggplot2)
 # library(tibble)
 # library(zoo)        # na.approx() -- only needed for the 2011-2014 gap fill
 
@@ -603,7 +605,13 @@ library(tidyr)
 library(ggplot2)
 
 # ---- Settings (change these only) -----------------------------------------
-n_cycle    <- 5L      # years repeated: 1961-1970
+# n_cycle MUST match the plankton and effort spin-ups, because the three
+# forcings are read side by side per year in 05: a mismatch puts the
+# temperature cycle out of phase with the resource and effort cycles for the
+# whole 1861-1960 spin-up. 02.Plankton_prep.Rmd uses 10, and
+# Effort_spin_1861_2010.csv is built on 10 as well (its 1960 repeats 1970,
+# 1956-60 repeat 1966-70). This was 5, which was the odd one out.
+n_cycle    <- 10L     # years repeated: 1961-1970
 spin_start <- 1861L
 spin_end   <- 1960L
 spin_years <- spin_start:spin_end
@@ -622,6 +630,51 @@ combined_full <- bind_rows(spinup, combined_wide_layers) %>% arrange(year)
 
 stopifnot(nrow(combined_full) == length(spin_years) + nrow(combined_wide_layers),  # 100 + 50
           !anyDuplicated(combined_full$year))
+
+# Check the repeated block is aligned backward from 1960 rather than forward
+# from 1861. Backward alignment is what makes the repeated block finish exactly
+# where the real data begins, so there is no jump at the 1960/1961 join: 1960
+# must carry the values of 1970, the last year of the repeated block, and 1861
+# must carry the values of 1961, its first year.
+real_data_by_year  <- combined_wide_layers %>% arrange(year)
+temperature_layers <- c("r0to50", "r50to150")
+temperatures_in_year <- function(temperature_table, which_year) {
+  as.numeric(temperature_table[temperature_table$year == which_year,
+                               temperature_layers])
+}
+last_year_of_repeated_block  <- spin_end + n_cycle   # 1970
+first_year_of_repeated_block <- spin_end + 1         # 1961
+stopifnot(
+  isTRUE(all.equal(temperatures_in_year(spinup, spin_end),
+                   temperatures_in_year(real_data_by_year,
+                                        last_year_of_repeated_block))),
+  isTRUE(all.equal(temperatures_in_year(spinup, spin_start),
+                   temperatures_in_year(real_data_by_year,
+                                        first_year_of_repeated_block)))
+)
+
+# Cross-script check. Temperature, plankton and fishing effort are all read
+# year by year in 05, so if their spin-ups repeat on different cycle lengths
+# the three forcings sit out of phase for the whole of 1861-1960: a warm year
+# could be paired with a low-plankton year for no physical reason. The effort
+# file is the easiest one to check against, because its repeated block is
+# visible in the file itself -- the number of distinct rows in the spin-up
+# period IS its cycle length. Skipped when the effort file has not been built
+# yet, so 01 can still be run on its own.
+effort_file <- "Ess_Fishmip_data/Effort_spin_1861_2010.csv"
+if (file.exists(effort_file)) {
+  effort_all_years     <- read.csv(effort_file, check.names = FALSE)
+  effort_gear_columns  <- setdiff(names(effort_all_years), "year")
+  effort_during_spinup <- effort_all_years[effort_all_years$year <= spin_end,
+                                           effort_gear_columns, drop = FALSE]
+  effort_cycle_length  <- nrow(unique(effort_during_spinup))
+  if (!identical(as.integer(effort_cycle_length), as.integer(n_cycle))) {
+    stop("n_cycle = ", n_cycle, " but the effort spin-up repeats on a ",
+         effort_cycle_length, "-year cycle; align them before running 05.",
+         call. = FALSE)
+  }
+  message("spin-up cycle ", n_cycle, " y, matches the effort file")
+}
 print(combined_full)
 
 # ---- Plot ------------------------------------------------------------------
