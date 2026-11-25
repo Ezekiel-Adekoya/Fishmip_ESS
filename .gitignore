@@ -6,3 +6,11 @@ Ess_Fishmip_data/
 # Rscript writes this in the project root on every run of 05 (unguarded print()
 # calls); it is not an output anyone needs to keep.
 Rplots.pdf
+
+# An R session history file; it is not part of the pipeline.
+.Rhistory
+
+# Written by 01.Temp_prep.Rmd (write.csv near the end), so it is an output of
+# the pipeline rather than an input to it. Nothing reads it -- 05 reads the
+# tracked Ess_Fishmip_data/Temp_by_depth_spin.csv instead.
+Temp_by depth.csv

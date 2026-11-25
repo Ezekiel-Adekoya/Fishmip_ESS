@@ -605,8 +605,19 @@ Figure for CATCHES
 # as zeros from the factual table rather than extracted from sims_with_no_fishing
 # (plotYieldGear returns no rows for it, which caused the "0, 1 rows" error).
 
-# read in observed catch data
-yield_ts <- readRDS("Ess_Fishmip_data/yield_ts.RDS")
+# Observed catch comes from the tracked NAFO table, which is stored one column
+# per species. yield_ts is just its long form, so it is derived here rather than
+# read from a separate yield_ts.RDS. That file was untracked, so nobody else
+# could run this chunk, and it held nothing the NAFO table does not: pivoting
+# the NAFO table reproduces it exactly -- all 1064 rows, including the 207 NA
+# catches, which are left as NA because unreported is not the same as zero.
+read_observed_catch_long <- function() {
+  readRDS(file.path("Ess_Fishmip_data", "new_NAFO_4VW_Catches.RDS")) |>
+    tidyr::pivot_longer(-Year, names_to = "Species", values_to = "Yield") |>
+    arrange(Species, Year)
+}
+
+yield_ts <- read_observed_catch_long()
 yield_ts <- yield_ts |> rename(Yield_Obs = Yield) |>
   filter(!Species %in% c("Sand Lance", "Capelin", "Longhorn Sculpin")) |>
   # names -> display labels (harmless if they already are display labels)
@@ -1078,8 +1089,9 @@ for (sc in scen_levels) {
 
 ### Observed catch
 ```{r tc-obs}
-# read in observed catch data
-yield_ts <- readRDS(file.path("Ess_Fishmip_data", "yield_ts.RDS")) |>
+# Same observed catch as the chunk above, reloaded because this chunk can be run
+# on its own. read_observed_catch_long() is defined there.
+yield_ts <- read_observed_catch_long() |>
   rename(Yield_Obs = Yield) |>
   filter(!Species %in% c("Sand Lance", "Capelin", "Longhorn Sculpin")) |>
   mutate(Species = factor(Species, levels = unique(Species))) |>
