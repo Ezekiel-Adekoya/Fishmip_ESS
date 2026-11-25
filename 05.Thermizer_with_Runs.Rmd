@@ -272,7 +272,11 @@ effort_counter<- effort_no_fishing
 # per-web difference isolates the seal effect and cancels the perturbation drift =>
 # base conclusions on the paired difference / fraction of webs, not the ribbon spread.
 # sd_web = 0.1 = primary (~10% CV/link, realistic); 0.2 = stronger stress test (below).
-n_sims <- 10; sd_web <- 0.1
+# n_sims = 1 runs the unperturbed web once, which is what you want for checking
+# the calibration: no ensemble spread to read through, so any mismatch against
+# observations is the model itself rather than web perturbation. Raise to 1000
+# for the full ensemble once the calibration looks right.
+n_sims <- 1; sd_web <- 0.1
 
 # CACHE GUARD: the n=1000 paired ensemble is the expensive step (~15 min). Run it
 # ONCE; every later knit reads the saved RDS in seconds. To regenerate after changing
