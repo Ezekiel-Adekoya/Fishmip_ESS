@@ -38,18 +38,13 @@ source("Ess_Fishmip_data/Useful_functions.R")
 
 region_area_m2 <- 146360555008      # Eastern Scotian Shelf
 
-# steady() and matchBiomasses() need inputs that are constant in time, and those
-# constants must be the TIME AVERAGE over the same period the calibration targets
-# are averaged over. The observed biomass in species_params is a 1970-2010 mean
-# (it matches the 1970-2010 survey average at a ratio of 0.994), so the forcing
-# and the effort are averaged over 1970-2010 as well.
-#
-# This used to be 1978:1981, borrowed from the window 04 uses for its anchor.
-# That fitted time-averaged targets against a four-year forcing window, which is
-# inconsistent: 1978-81 is 0.1 C warmer than the 1970-2010 mean, and a long way
-# from the 1961-1970 conditions the spin-up repeats (0.5 C cooler, 19% more
-# effort).
-reference_years <- 1970:2010
+# steady() and matchBiomasses() need inputs that are constant in time. The
+# constants are time averages over 1978-1981, the same years the previous
+# (Stage 1) calibration used -- its initial_effort is exactly the 1978-1981 mean
+# of the effort series. Keeping the same years means the only thing that differs
+# from Stage 1 is the resource the fish are fitted to. Resource, temperature and
+# effort are all averaged over this one window.
+reference_years <- 1978:1981
 
 # steady() needs longer than its default here: a 50-year test run was still
 # moving. The convergence tolerance is left at mizer's default (tol = 0.1 * dt),
@@ -145,9 +140,9 @@ temperature_held_constant <- matrix(
   dimnames = list(time = calibration_time_labels,
                   realm = colnames(ocean_temp_by_year)))
 
-# Effort is held at its time average over the same window, gear by gear, for the
-# same reason. Stage 1's initial_effort turns out to be exactly the 1978-1981
-# mean, so leaving it alone would quietly reintroduce the four-year window.
+# Effort is held at its time average over the same window, gear by gear. For
+# 1978-1981 this reproduces Stage 1's initial_effort, but it is set explicitly
+# so the effort always follows reference_years if the window is ever changed.
 effort_table <- read.csv("Ess_Fishmip_data/Effort_spin_1861_2010.csv",
                          check.names = FALSE)
 effort_in_window <- effort_table[effort_table$year %in% reference_years,

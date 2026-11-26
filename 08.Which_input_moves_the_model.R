@@ -1,13 +1,13 @@
 # Which input moves the recalibrated model away from its calibrated state?
 #
-# 06 fits the fish to the time-averaged (1970-2010) COBALT resource, temperature
-# and effort. 07 then runs the real 1861-2010 series and total biomass climbs
-# from 6.7 to about 125 g/m2 by 1961. A dynamic run is not expected to sit at
-# the calibrated state, so the departure is not itself a fault -- but it is
-# worth knowing WHICH input causes it, because that says where to look.
+# 06 fits the fish to the COBALT resource with resource, temperature and effort
+# held at their 1978-1981 averages. 07 then runs the real 1861-2010 series. A
+# dynamic run is not expected to sit at the calibrated state, but it is worth
+# knowing WHICH input moves it, because that says where to look when the fit to
+# data is poor.
 #
-# This script answers that by starting every run from 06's calibrated state and
-# releasing one input at a time, holding the other two at their 1970-2010 mean:
+# This script starts every run from 06's calibrated state and releases one
+# input at a time, holding the other two at their 1978-1981 mean:
 #
 #   A  everything constant        -> does the calibrated state hold at all?
 #   B  only effort varies
@@ -16,18 +16,22 @@
 #
 # RESULT WHEN LAST RUN (total biomass, g/m2)
 #                                   1861    1870    1961    2010
-#   A  all constant                 6.70    6.78    6.71    6.70
-#   B  only effort varies           6.70   64.13  125.39   27.88
-#   C  only temperature varies      6.70    6.75    6.62    6.56
-#   D  only resource varies         6.70    6.77    6.70    6.71
+#   A  all constant                 6.49    6.53    6.51    6.50
+#   B  only effort varies           6.49    8.57    9.95    6.04
+#   C  only temperature varies      6.49    6.57    6.56    6.45
+#   D  only resource varies         6.49    6.53    6.50    6.51
 #
 # So the calibrated state is a genuine steady state of the model (A), the
-# year-to-year COBALT resource and temperature barely move it (C, D), and the
-# whole departure comes from effort (B). The per-gear table printed at the end
-# shows why: the Seals "gear" is about 70 times weaker over the 1861-1960
-# spin-up (0.004) than over the 1970-2010 window the model was balanced on
-# (0.278). The fitted community relies on seal mortality, so it balloons in the
-# years when there were few seals.
+# year-to-year COBALT resource and temperature barely move it (C, D), and
+# nearly all of the movement in the dynamic run comes from effort (B).
+#
+# WHY THE CALIBRATION WINDOW MATTERS SO MUCH
+# The same test on a calibration that used 1970-2010 averages gave 125 g/m2 at
+# 1961 in case B instead of 9.95. The Seals "gear" averages 0.278 over
+# 1970-2010 but only 0.023 in 1978-1981 and 0.004 over the spin-up. Balancing
+# the fish against the 1970-2010 mean builds in seal mortality that did not
+# exist in the early years, so the community balloons when it is taken away.
+# 1978-1981 is close to the spin-up conditions, so it does not.
 #
 # Takes roughly ten minutes: four 150-year projections.
 # Run from the project root:  Rscript 08.Which_input_moves_the_model.R
@@ -41,7 +45,7 @@ suppressMessages({
 source("Ess_Fishmip_data/Useful_functions.R")
 
 region_area_m2     <- 146360555008
-averaging_window   <- as.character(1970:2010)   # the window 06 calibrated on
+averaging_window   <- as.character(1978:1981)   # the window 06 calibrated on
 
 params <- readRDS("Ess_Fishmip_data/params_GFDL_steady.RDS")
 
@@ -118,5 +122,5 @@ run_one_case("D  only resource varies",
 
 cat("\neffort by gear: the calibration window against the spin-up\n")
 print(round(rbind(
-  calibration_1970_2010 = colMeans(effort_by_year[averaging_window, ]),
+  calibration_window    = colMeans(effort_by_year[averaging_window, ]),
   spinup_1861_1960      = colMeans(effort_by_year[as.character(1861:1960), ])), 3))

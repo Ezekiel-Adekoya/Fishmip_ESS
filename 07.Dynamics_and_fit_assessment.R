@@ -201,4 +201,49 @@ for (i in seq_len(min(8, nrow(per_species)))) {
 }
 cat(sprintf("\nwithin 2x of observed: %d/%d species\n",
             sum(abs(per_species$log10_ratio) < log10(2)), nrow(per_species)))
-cat(sprintf("wrote %s\n", output_file))
+# ---- Skill metrics the FishMIP regional workflow asks for --------------------
+
+# Ortega-Cisneros et al. (2025, Earth's Future), step 6, asks for at least the
+# bias and the correlation of the catch time series and, where observations
+# exist, the biomass time series, for key species. It also says the catch years
+# 2005-2010 must not be used in calibration, because they are held back to test
+# predictive skill. The calibration here uses 1978-1981 only, so 2005-2010 is a
+# genuine out-of-sample test, and it is reported separately for that reason.
+skill_table <- function(modelled_long, observed_long, years) {
+  inner_join(modelled_long, observed_long, by = c("Year", "Species")) |>
+    filter(Year %in% years, modelled > 0, observed > 0) |>
+    group_by(Species) |>
+    filter(n() >= 4) |>
+    summarise(
+      # positive bias means the model is ABOVE the observations
+      bias_log10  = median(log10(modelled / observed)),
+      correlation = suppressWarnings(cor(modelled, observed)),
+      years_used  = n(), .groups = "drop")
+}
+
+report_skill <- function(label, modelled_long, observed_long, years) {
+  skill <- skill_table(modelled_long, observed_long, years) |>
+    filter(!Species %in% multiplied_forage_species)
+  if (!nrow(skill)) { cat(sprintf("%-34s no data\n", label)); return(invisible()) }
+  cat(sprintf(paste0("%-34s %2d species | median bias %+5.2f log10 (x%.2f) | ",
+                     "within 2x: %2d | median correlation %+5.2f | r > 0.5: %2d\n"),
+              label, nrow(skill), median(skill$bias_log10),
+              10^median(skill$bias_log10),
+              sum(abs(skill$bias_log10) < log10(2)),
+              median(skill$correlation, na.rm = TRUE),
+              sum(skill$correlation > 0.5, na.rm = TRUE)))
+  invisible(skill)
+}
+
+cat("\n=== bias and correlation by species (species without multipliers) ===\n")
+cat("bias is log10(modelled/observed): positive means the model is too high\n\n")
+report_skill("catch,   1970-2004 (in sample era)", modelled_yield_long,
+             observed_catch_long, 1970:2004)
+report_skill("catch,   2005-2010 (held out)", modelled_yield_long,
+             observed_catch_long, 2005:2010)
+report_skill("biomass, 1970-2004 (in sample era)", modelled_biomass_long,
+             observed_biomass_long, 1970:2004)
+report_skill("biomass, 2005-2010 (held out)", modelled_biomass_long,
+             observed_biomass_long, 2005:2010)
+
+cat(sprintf("\nwrote %s\n", output_file))
