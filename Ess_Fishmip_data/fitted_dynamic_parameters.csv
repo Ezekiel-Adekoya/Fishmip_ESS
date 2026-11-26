@@ -1,0 +1,6 @@
+"parameter","fitted_value","no_change_value"
+"seal_rise_multiplier",0.48832,1
+"seal_saturation_effort",1000,Inf
+"cod_extra_mortality",0.69546,0
+"cod_moratorium_factor",0.39341,1
+"haddock_moratorium_factor",0.18611,1

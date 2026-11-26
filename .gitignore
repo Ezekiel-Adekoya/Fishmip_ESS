@@ -17,3 +17,6 @@ Temp_by depth.csv
 
 # Simulation output from 07; regenerable and large.
 Ess_Fishmip_data/sims_GFDL_recalibrated.RDS
+
+# Output of 10; regenerable.
+Ess_Fishmip_data/sims_GFDL_fitted.RDS
