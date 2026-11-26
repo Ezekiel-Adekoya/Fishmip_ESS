@@ -1,22 +1,22 @@
 "parameter","fitted_value","no_change_value"
-"seal_rise_multiplier",0.55156,1
+"seal_rise_multiplier",0.55165,1
 "seal_saturation_effort",1000,Inf
-"cod_extra_mortality",0.62352,0
-"cod_moratorium_factor",0.38726,1
-"haddock_moratorium_factor",0.2104,1
-"start_x_Atlantic Cod",0.9478,1
-"start_x_Haddock",0.012764,1
-"start_x_White Hake",7.2067,1
-"start_x_Red Hake",0.13918,1
-"start_x_Silver Hake",0.78191,1
-"start_x_Pollock",0.88284,1
-"start_x_Redfish Unseparated",157.91,1
-"start_x_American Plaice",0.70363,1
-"start_x_Yellowtail Flounder",0.6632,1
-"start_x_Witch Flounder",523.64,1
-"start_x_Thorny Skate",0.6306,1
-"start_x_Winter Skate",4.3248,1
-"start_x_Spiny Dogfish",89.262,1
-"start_x_Monkfish",5.3687,1
-"start_x_Longhorn Sculpin",2.6855,1
-"start_x_Atlantic Halibut",0.42531,1
+"cod_extra_mortality",0.62603,0
+"cod_moratorium_factor",0.38666,1
+"haddock_moratorium_factor",0.20661,1
+"start_x_Atlantic Cod",0.89997,1
+"start_x_Haddock",0.87022,1
+"start_x_White Hake",1.5559,1
+"start_x_Red Hake",0.80669,1
+"start_x_Silver Hake",1.0108,1
+"start_x_Pollock",1.0028,1
+"start_x_Redfish Unseparated",1.0348,1
+"start_x_American Plaice",0.78772,1
+"start_x_Yellowtail Flounder",0.95171,1
+"start_x_Witch Flounder",1.0081,1
+"start_x_Thorny Skate",0.6132,1
+"start_x_Winter Skate",3.4221,1
+"start_x_Spiny Dogfish",49.088,1
+"start_x_Monkfish",2.3076,1
+"start_x_Longhorn Sculpin",1.3887,1
+"start_x_Atlantic Halibut",0.96652,1

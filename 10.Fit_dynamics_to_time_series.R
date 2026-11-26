@@ -45,6 +45,17 @@
 # are not pinned down by data from 1970 on and should stay near 1. The script
 # reports which ones moved and how much the fit depends on them.
 #
+# THE PENALTY ON THE STARTING MULTIPLIERS
+# Left free, the optimiser gave some species multipliers in the hundreds to
+# chase one or two early survey points, for almost no gain in fit. So each
+# multiplier now has to pay for itself: the objective is the mismatch plus
+#     start_penalty_weight * mean(log10(multiplier)^2).
+# With 16 fitted species, changing one species' start tenfold adds
+# start_penalty_weight / 16 to the objective, so it only happens if the
+# mismatch falls by more than that. Every species is treated the same way and
+# no species list is chosen by hand. Multipliers the data support stay; the
+# rest settle at 1.
+#
 # WHAT IS FITTED TO WHAT
 # Survey biomass and fishery catch by species, 1970-2004, for the 16 species
 # whose survey biomass carries no catchability multiplier. Catch means the four
@@ -90,6 +101,11 @@ last_fitted_year   <- 2004      # 2005-2010 are held out, as the FishMIP protoco
 last_year          <- 2010
 cod_mortality_starts <- 1990
 moratorium_starts    <- 1993
+
+# How strongly the starting multipliers are pulled towards 1 (see the header).
+# 0 switches the penalty off. It can be set from outside to test other values,
+# for example START_PENALTY_WEIGHT=0.01 Rscript 10.Fit_dynamics_to_time_series.R
+start_penalty_weight <- as.numeric(Sys.getenv("START_PENALTY_WEIGHT", "0.1"))
 
 fitted_values_file <- "Ess_Fishmip_data/fitted_dynamic_parameters.csv"
 fitted_sim_file    <- "Ess_Fishmip_data/sims_GFDL_fitted.RDS"
@@ -253,12 +269,23 @@ run_from_vector <- function(values) {
 }
 
 fitted_years <- first_fitted_year:last_fitted_year
-objective <- function(values) {
+
+# The mismatch with the data alone. This is what the reports below quote, so
+# the numbers can be compared between fits with different penalty weights.
+data_mismatch <- function(values) {
   run <- tryCatch(run_from_vector(values), error = function(e) NULL)
   if (is.null(run)) return(1e6)
   value <- mismatch(run, fitted_years)
   if (is.finite(value)) value else 1e6
 }
+
+# What the starting multipliers cost: zero when every multiplier is 1.
+start_penalty <- function(values) {
+  start_penalty_weight * mean(values[multiplier_positions]^2)
+}
+
+# What the optimiser minimises.
+objective <- function(values) data_mismatch(values) + start_penalty(values)
 
 # "No change": seal effort as in the file, no extra cod mortality, no
 # moratorium effect. A saturation scale of 1000 is about a thousand times the
@@ -302,7 +329,7 @@ fits <- lapply(names(starting_points), function(start_name) {
   fit <- optimParallel(par = starting_points[[start_name]], fn = objective,
                        lower = lower_bounds, upper = upper_bounds,
                        control = list(maxit = 150, factr = 1e8))
-  cat(sprintf("start '%s': mismatch %.4f -> %.4f after %d evaluations\n",
+  cat(sprintf("start '%s': mismatch plus penalty %.4f -> %.4f after %d evaluations\n",
               start_name, objective(starting_points[[start_name]]), fit$value,
               fit$counts[["function"]]))
   fit
@@ -321,7 +348,8 @@ natural_scale <- function(values) c(
 
 cat("\nfitted dynamic parameters from each starting point:\n")
 print(round(t(sapply(fits, function(fit) c(
-  natural_scale(fit$par)[seq_len(number_of_dynamic)], mismatch = fit$value))), 4))
+  natural_scale(fit$par)[seq_len(number_of_dynamic)],
+  mismatch = data_mismatch(fit$par), penalty = start_penalty(fit$par)))), 4))
 cat("\nfitted starting multipliers from each starting point:\n")
 multiplier_table <- sapply(fits, function(fit) 10^fit$par[multiplier_positions])
 rownames(multiplier_table) <- fitted_species
@@ -337,8 +365,11 @@ fitted_run <- run_from_vector(best_fit$par)
 # nothing is not supported by the data, whatever value the optimiser gave it.
 cat(sprintf("\nmismatch over the fitted years (%d-%d); lower is better\n",
             first_fitted_year, last_fitted_year))
-cat(sprintf("  %-34s %.4f\n", "no change (the 07 run)", objective(no_change)))
-cat(sprintf("  %-34s %.4f\n", "everything fitted", best_fit$value))
+cat(sprintf("  (starting multiplier penalty weight %g; the penalty is not included below)\n",
+            start_penalty_weight))
+best_mismatch <- data_mismatch(best_fit$par)
+cat(sprintf("  %-34s %.4f\n", "no change (the 07 run)", data_mismatch(no_change)))
+cat(sprintf("  %-34s %.4f\n", "everything fitted", best_mismatch))
 parameter_groups <- list("without starting multipliers"      = multiplier_positions,
                          "without the five dynamic ones"     = seq_len(number_of_dynamic),
                          "without seal saturation (1 and 2)" = 1:2,
@@ -348,7 +379,7 @@ parameter_groups <- list("without starting multipliers"      = multiplier_positi
 for (group_name in names(parameter_groups)) {
   values <- best_fit$par
   values[parameter_groups[[group_name]]] <- no_change[parameter_groups[[group_name]]]
-  cat(sprintf("  %-34s %.4f\n", group_name, objective(values)))
+  cat(sprintf("  %-34s %.4f\n", group_name, data_mismatch(values)))
 }
 
 # How much each starting multiplier matters on its own: reset one species at a
@@ -359,7 +390,7 @@ cat("\nstarting multipliers: fitted value, and the mismatch lost if reset to 1\n
 multiplier_cost <- sapply(seq_along(fitted_species), function(i) {
   values <- best_fit$par
   values[multiplier_positions[i]] <- 0
-  objective(values) - best_fit$value
+  data_mismatch(values) - best_mismatch
 })
 multiplier_report <- data.frame(
   species = fitted_species,
@@ -442,7 +473,9 @@ saveRDS(list(biomass = fitted_run$biomass, catch = fitted_run$catch,
              baseline_biomass = baseline_run$biomass,
              baseline_catch = baseline_run$catch,
              fitted_values = fitted_values,
+             start_penalty_weight = start_penalty_weight,
              all_fits = lapply(fits, function(fit) list(
-               values = natural_scale(fit$par), mismatch = fit$value))),
+               values = natural_scale(fit$par),
+               mismatch = data_mismatch(fit$par)))),
         fitted_sim_file)
 cat(sprintf("\nwrote %s and %s\n", fitted_values_file, fitted_sim_file))
