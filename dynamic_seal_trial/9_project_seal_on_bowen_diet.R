@@ -118,9 +118,15 @@ seal_numbers_in <- function(stretch_simulations) {
 # only slowly, so food alone does not stop the model seals. The third fitted
 # value is the limit on the number of pups recruited each year (the seal's
 # R_max): as the colony fills, each extra adult adds fewer surviving pups.
+#
+# The fit is to the counts themselves (thousands of seals), not their logs.
+# On the log scale the many early years of few seals dominate and the
+# levelling-off after 2000 carries almost no weight. SEAL_FIT_SCALE=log gives
+# the log fit back.
 seal_erepro <- demography[["erepro"]]
 seal_harvest_rate <- demography[["harvest_rate"]]
 seal_pup_limit <- demography[["R_max"]]
+seal_fit_scale <- Sys.getenv("SEAL_FIT_SCALE", "natural")
 if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
   count_years <- as.character(1961:2010)
   mismatch_with_counts <- function(values) {
@@ -128,8 +134,14 @@ if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
                                                       exp(values[3]))),
                         error = function(e) NULL)
     if (is.null(numbers) || any(!is.finite(numbers)) || any(numbers <= 0)) return(1e6)
-    sum((log(numbers[count_years]) - log(seal_counts[count_years]))^2) +
-      if (values[2] < 0) 1e3 * values[2]^2 else 0
+    mismatch <- if (seal_fit_scale == "log") {
+      sum((log(numbers[count_years]) - log(seal_counts[count_years]))^2)
+    } else {
+      # divided by the mean count squared, so the size is comparable to the log fit
+      sum((numbers[count_years] - seal_counts[count_years])^2) /
+        mean(seal_counts[count_years])^2
+    }
+    mismatch + if (values[2] < 0) 1e3 * values[2]^2 else 0
   }
   # Two starting points for the pup limit, since a limit set far too high
   # has no effect and gives the fit nothing to follow.
@@ -137,10 +149,10 @@ if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
     optim(c(log(seal_erepro), seal_harvest_rate, log(seal_pup_limit * pup_limit_start_factor)),
           mismatch_with_counts, control = list(maxit = 300, reltol = 1e-5)))
   fit <- fits[[which.min(sapply(fits, function(one_fit) one_fit$value))]]
-  cat(sprintf("seal rates fitted in the full model: erepro %.4f -> %.4f | harvest rate %.3f -> %.3f per year | pup limit %.3g -> %.3g | log RMSE against counts %.3f (other start %.3f)\n",
-              seal_erepro, exp(fit$par[1]), seal_harvest_rate, max(fit$par[2], 0),
-              seal_pup_limit, exp(fit$par[3]), sqrt(fit$value / length(count_years)),
-              sqrt(max(sapply(fits, function(one_fit) one_fit$value)) / length(count_years))))
+  cat(sprintf("seal rates fitted in the full model (%s scale): erepro %.4f -> %.4f | harvest rate %.3f -> %.3f per year | pup limit %.3g -> %.3g | mismatch %.4f (other start %.4f)\n",
+              seal_fit_scale, seal_erepro, exp(fit$par[1]), seal_harvest_rate,
+              max(fit$par[2], 0), seal_pup_limit, exp(fit$par[3]), fit$value,
+              max(sapply(fits, function(one_fit) one_fit$value))))
   seal_erepro <- exp(fit$par[1])
   seal_harvest_rate <- max(fit$par[2], 0)
   seal_pup_limit <- exp(fit$par[3])
@@ -171,6 +183,10 @@ state_in <- function(year) {
 }
 seal_numbers <- sapply(years, function(year) seals_in_thousands(state_in(year)$n))
 names(seal_numbers) <- years
+count_years <- as.character(1961:2010)
+cat(sprintf("seals against counts, 1961-2010: log RMSE %.3f | RMSE %.1f thousand\n",
+            sqrt(mean((log(seal_numbers[count_years]) - log(seal_counts[count_years]))^2)),
+            sqrt(mean((seal_numbers[count_years] - seal_counts[count_years])^2))))
 
 # What the seals eat each year, kt by species, and the mortality they cause.
 seal_pred_rate_in <- function(year) {
