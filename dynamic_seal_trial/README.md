@@ -58,7 +58,8 @@ Rscript dynamic_seal_trial/plot_seal_on_bowen_diet.R
   year in the Bowen & Harrison proportions.
 - `9_project_seal_on_bowen_diet.R`: projects 1861-2010. With
   `FIT_SEALS_IN_FULL_MODEL=1` it first fits the seal's reproductive efficiency
-  and harvest rate to the counts inside the full model.
+  and harvest rate, and the limit on pups recruited a year, to the counts
+  inside the full model.
 - Scripts 1, 2 and 5 are the earlier ones, now reading their starting model
   from `BASE_PARAMS` and `SEAL_SOURCE`. They and scripts 8 and 9 still read
   Paper 2's seal parameters and the digitised seal counts from

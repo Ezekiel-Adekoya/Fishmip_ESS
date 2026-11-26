@@ -75,10 +75,10 @@ abundance_in_1961["Grey Seal", ] <- abundance_in_1961["Grey Seal", ] *
 
 # One run from the 1961 state for a given seal reproductive efficiency and
 # harvest rate. Returns the three stretches of simulation.
-run_from_1961 <- function(seal_erepro, seal_harvest_rate) {
+run_from_1961 <- function(seal_erepro, seal_harvest_rate, seal_pup_limit) {
   growing_params <- params_dynamic
   growing_params@species_params$erepro[is_seal] <- seal_erepro
-  growing_params@species_params$R_max[is_seal]  <- demography[["R_max"]]
+  growing_params@species_params$R_max[is_seal]  <- seal_pup_limit
   stretches <- list(list(from = 1961, to = 1967, harvest = 0),
                     list(from = 1967, to = 1991, harvest = seal_harvest_rate),
                     list(from = 1991, to = 2010, harvest = 0))
@@ -113,29 +113,42 @@ seal_numbers_in <- function(stretch_simulations) {
 # year, so with those rates it does not follow the counts. With
 # FIT_SEALS_IN_FULL_MODEL=1 the two rates are fitted again here, in the full
 # model, to the counted numbers for 1961-2010.
+#
+# The counts level off after about 2000 while food per seal is still falling
+# only slowly, so food alone does not stop the model seals. The third fitted
+# value is the limit on the number of pups recruited each year (the seal's
+# R_max): as the colony fills, each extra adult adds fewer surviving pups.
 seal_erepro <- demography[["erepro"]]
 seal_harvest_rate <- demography[["harvest_rate"]]
+seal_pup_limit <- demography[["R_max"]]
 if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
   count_years <- as.character(1961:2010)
   mismatch_with_counts <- function(values) {
-    numbers <- tryCatch(seal_numbers_in(run_from_1961(exp(values[1]), max(values[2], 0))),
+    numbers <- tryCatch(seal_numbers_in(run_from_1961(exp(values[1]), max(values[2], 0),
+                                                      exp(values[3]))),
                         error = function(e) NULL)
     if (is.null(numbers) || any(!is.finite(numbers)) || any(numbers <= 0)) return(1e6)
     sum((log(numbers[count_years]) - log(seal_counts[count_years]))^2) +
       if (values[2] < 0) 1e3 * values[2]^2 else 0
   }
-  fit <- optim(c(log(seal_erepro), seal_harvest_rate), mismatch_with_counts,
-               control = list(maxit = 120, reltol = 1e-4))
-  cat(sprintf("seal rates fitted in the full model: erepro %.4f -> %.4f | harvest rate %.3f -> %.3f per year | log RMSE against counts %.3f\n",
+  # Two starting points for the pup limit, since a limit set far too high
+  # has no effect and gives the fit nothing to follow.
+  fits <- lapply(c(1, 0.1), function(pup_limit_start_factor)
+    optim(c(log(seal_erepro), seal_harvest_rate, log(seal_pup_limit * pup_limit_start_factor)),
+          mismatch_with_counts, control = list(maxit = 300, reltol = 1e-5)))
+  fit <- fits[[which.min(sapply(fits, function(one_fit) one_fit$value))]]
+  cat(sprintf("seal rates fitted in the full model: erepro %.4f -> %.4f | harvest rate %.3f -> %.3f per year | pup limit %.3g -> %.3g | log RMSE against counts %.3f (other start %.3f)\n",
               seal_erepro, exp(fit$par[1]), seal_harvest_rate, max(fit$par[2], 0),
-              sqrt(fit$value / length(count_years))))
+              seal_pup_limit, exp(fit$par[3]), sqrt(fit$value / length(count_years)),
+              sqrt(max(sapply(fits, function(one_fit) one_fit$value)) / length(count_years))))
   seal_erepro <- exp(fit$par[1])
   seal_harvest_rate <- max(fit$par[2], 0)
+  seal_pup_limit <- exp(fit$par[3])
 }
-simulations <- c(list(spin_up), run_from_1961(seal_erepro, seal_harvest_rate))
+simulations <- c(list(spin_up), run_from_1961(seal_erepro, seal_harvest_rate, seal_pup_limit))
 growing_params <- params_dynamic
 growing_params@species_params$erepro[is_seal] <- seal_erepro
-growing_params@species_params$R_max[is_seal]  <- demography[["R_max"]]
+growing_params@species_params$R_max[is_seal]  <- seal_pup_limit
 
 # Join the stretches. The last year of one is the first of the next.
 join_stretches <- function(per_simulation) {
@@ -180,7 +193,8 @@ seal_mortality_on <- function(species, year, sizes) {
 
 saveRDS(list(biomass = biomass, catch = catch, seal_numbers = seal_numbers,
              eaten = eaten, demography = demography,
-             seal_erepro = seal_erepro, seal_harvest_rate = seal_harvest_rate),
+             seal_erepro = seal_erepro, seal_harvest_rate = seal_harvest_rate,
+             seal_pup_limit = seal_pup_limit),
         file.path(work_folder, "dynamic_seal_run.rds"))
 
 # ---- Report ------------------------------------------------------------------

@@ -6,7 +6,12 @@
 #   - each seal eats 1.73 t of fish a year (12 x 170 kg body mass, 85% fish);
 #   - the fish it eats are in the Bowen & Harrison (1994) proportions by
 #     weight: 80.9% sand lance, 11.0% cod, 2.6% silver hake, 1.4% plaice,
-#     1.3% redfish, 1.1% yellowtail, 1.7% everything else;
+#     1.3% redfish, 1.1% yellowtail, 1.7% everything else. The species
+#     Bowen & Harrison do not name share one preference, so the seal takes
+#     them in proportion to how much of each is there. (Giving each of them
+#     an equal share of the diet forced a very high preference for rare
+#     species: halibut ended at the highest preference of all and was eaten
+#     out in the projection.)
 #   - the other 15% of its food comes from outside the model.
 # The fish are re-matched to their observed biomass each time the seal changes.
 #
@@ -39,11 +44,11 @@ is_seal <- all_species == "Grey Seal"
 fish_size_bins <- (length(params@w_full) - length(params@w) + 1):length(params@w_full)
 adult_seal_sizes <- params@w >= 16000
 
-# The share each species should make of the fish eaten. The 1.7% not named by
-# Bowen & Harrison is spread evenly over the other 13 species.
-target_share <- setNames(rep((1 - sum(bowen_share)) / (length(fish) - length(bowen_share)),
-                             length(fish)), fish)
-target_share[names(bowen_share)] <- bowen_share
+# The share each named species should make of the fish eaten, and the 1.7%
+# that the species Bowen & Harrison do not name should make together.
+unnamed_species <- setdiff(fish, names(bowen_share))
+unnamed_share_together <- 1 - sum(bowen_share)
+target_share <- c(bowen_share, "unnamed species together" = unnamed_share_together)
 target_total_kt <- fish_per_seal_tonnes * seal_target_thousand
 
 seals_in_thousands <- function(p) sum(p@initial_n["Grey Seal", ] * p@dw) / 1000
@@ -75,7 +80,9 @@ outside_food <- ext_encounter(params)
 outside_food["Grey Seal", ] <- 0
 ext_encounter(params) <- outside_food
 interaction_matrix <- params@interaction
-interaction_matrix["Grey Seal", fish] <- target_share / max(target_share)
+interaction_matrix["Grey Seal", names(bowen_share)] <- bowen_share / max(bowen_share)
+interaction_matrix["Grey Seal", unnamed_species] <-
+  unnamed_share_together / length(unnamed_species) / max(bowen_share)
 params <- quietly(setInteraction(params, interaction = interaction_matrix))
 
 # ---- Adjust preference and search rate until amount and proportions match ----
@@ -89,8 +96,13 @@ for (pass in 1:40) {
 
   # Preference for each species moves towards its target share. The largest
   # preference is kept at 1; the search rate carries the overall amount.
-  preference <- params@interaction["Grey Seal", fish] *
-    (target_share / pmax(share_now, 1e-12))^0.7
+  # The unnamed species all move by the same factor, so they keep one
+  # preference between them.
+  preference <- params@interaction["Grey Seal", fish]
+  preference[names(bowen_share)] <- preference[names(bowen_share)] *
+    (bowen_share / pmax(share_now[names(bowen_share)], 1e-12))^0.7
+  preference[unnamed_species] <- preference[unnamed_species] *
+    (unnamed_share_together / max(sum(share_now[unnamed_species]), 1e-12))^0.7
   interaction_matrix <- params@interaction
   interaction_matrix["Grey Seal", fish] <- preference / max(preference)
   params <- quietly(setInteraction(params, interaction = interaction_matrix))
@@ -178,6 +190,12 @@ for (species in names(bowen_share)) {
   cat(sprintf("  %-20s %5.1f%%  (%.1f%%)   preference %.3f\n", species,
               100 * eaten[species] / sum(eaten), 100 * bowen_share[species],
               params@interaction["Grey Seal", species]))
+}
+cat(sprintf("  %-20s %5.1f%%  (%.1f%%)   preference %.3f, the same for each\n",
+            "unnamed species", 100 * sum(eaten[unnamed_species]) / sum(eaten),
+            100 * unnamed_share_together, params@interaction["Grey Seal", unnamed_species[1]]))
+for (species in unnamed_species) {
+  cat(sprintf("    %-20s %5.2f%%\n", species, 100 * eaten[species] / sum(eaten)))
 }
 # Mean weight of the individual fish eaten, to compare with the measured ones.
 seal_pred_rate <- quietly(getPredRate(params))["Grey Seal", fish_size_bins]
