@@ -16,10 +16,14 @@
 #
 # RESULT WHEN LAST RUN (total biomass, g/m2)
 #                                   1861    1870    1961    2010
-#   A  all constant                 6.49    6.53    6.51    6.50
-#   B  only effort varies           6.49    8.57    9.95    6.04
-#   C  only temperature varies      6.49    6.57    6.56    6.45
-#   D  only resource varies         6.49    6.53    6.50    6.51
+#   A  all constant                 6.45    6.44    6.42    6.42
+#   B  only effort varies           6.45    8.16    9.58    1.74
+#   C  only temperature varies      6.45    6.45    6.71    6.44
+#   D  only resource varies         6.45    6.43    6.40    6.41
+#
+# (These are with the estimator-based adult mortality in 06. Before it was
+# added, case B ended at 6.04 in 2010 rather than 1.74: with realistic adult
+# mortality the community no longer rides out the rise in seal effort.)
 #
 # So the calibrated state is a genuine steady state of the model (A), the
 # year-to-year COBALT resource and temperature barely move it (C, D), and

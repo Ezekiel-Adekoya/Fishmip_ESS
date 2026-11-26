@@ -205,6 +205,92 @@ cat(sprintf("reference window %d-%d, temperature %.2f / %.2f C\n\n",
             min(reference_years), max(reference_years),
             temperature_at_reference[1], temperature_at_reference[2]))
 
+# ---- Adult natural mortality -------------------------------------------------
+
+# WHY THIS IS HERE
+# Stage 1 leaves background mortality at mizer's allometric default (z0), which
+# for the large species is 0.01-0.05 per year. Predation on adults is close to
+# zero and the seal gear takes no mature cod, so once fishing stops an adult cod
+# dies at about 2% a year. Stocks then cannot decline or stay down after the
+# fishery closes: modelled cod ROSE after the 1993 moratorium while the survey
+# fell to 13% of its 1978-1981 level. The skates and monkfish showed the same
+# flat trend, and remembered a perturbation to their starting abundance for
+# forty years.
+#
+# WHAT IS DONE
+# Each species gets a target for its TOTAL natural mortality as an adult from
+# the growth-based estimator of Then et al. (2015, ICES J. Mar. Sci. 72:82-92):
+#
+#     M = 4.118 * K^0.73 * Linf^-0.33        (K per year, Linf in cm)
+#
+# K is the von Bertalanffy growth rate in species_params_with_temp.csv and Linf
+# is the length at the model's own w_max, from its length-weight parameters, so
+# every number can be recomputed from files in this repository. The simpler rule
+# M = 1.5 K (Jensen 1996) gives nearly the same values for most species, so the
+# choice of estimator is not what drives the result.
+#
+# The model already kills some adults through predation and the seal gear
+# (herring, sand lance, silver hake, redfish and witch flounder especially). To
+# avoid counting that twice, the background rate is set to the target MINUS the
+# predation-plus-seal mortality adults experience at the start of calibration,
+# and it is never lowered below the value Stage 1 had.
+#
+# WHAT THIS DOES NOT DO
+# The rates are constant in time. They are not enough to reproduce the cod
+# collapse on their own (assessments have cod natural mortality rising after
+# about 1990), and they are estimator values, not Eastern Scotian Shelf
+# assessment values. Julia chose the estimator-based values on 2026-11-27.
+species_names <- as.character(params_thermizer@species_params$species)
+growth_rate_K <- thermal_data$k_vb
+asymptotic_length_cm <- (params_thermizer@species_params$w_max /
+                           params_thermizer@species_params$a)^
+  (1 / params_thermizer@species_params$b)
+target_adult_natural_mortality <- 4.118 * growth_rate_K^0.73 *
+  asymptotic_length_cm^(-0.33)
+names(target_adult_natural_mortality) <- species_names
+
+# Mean of a per-size rate over mature fish, weighted by their biomass, so the
+# number describes the mortality a typical adult gram of the species sees.
+adult_mean <- function(rate_by_size, species, p) {
+  is_mature <- p@w >= p@species_params[species, "w_mat"]
+  biomass_by_size <- p@initial_n[species, is_mature] * p@w[is_mature] *
+    p@dw[is_mature]
+  sum(rate_by_size[is_mature] * biomass_by_size) / sum(biomass_by_size)
+}
+
+# Natural mortality the model already applies to adults: predation by the other
+# fish plus the Seals gear. Fishing gears are not natural mortality.
+adult_predation_and_seal_mortality <- function(p) {
+  predation <- getPredMort(p)
+  seal_mortality <- getFMortGear(p)["Seals", , ]
+  sapply(species_names, function(species) {
+    adult_mean(predation[species, ], species, p) +
+      adult_mean(seal_mortality[species, ], species, p)
+  })
+}
+
+existing_adult_mortality <- adult_predation_and_seal_mortality(params_thermizer)
+stage1_background <- ext_mort(params_thermizer)
+new_background_rate <- pmax(stage1_background[, 1],
+                            target_adult_natural_mortality -
+                              existing_adult_mortality)
+# The same rate at every size, as Stage 1 had it; predation supplies the extra
+# mortality on small fish.
+ext_mort(params_thermizer) <- matrix(
+  new_background_rate, nrow = nrow(stage1_background),
+  ncol = ncol(stage1_background), dimnames = dimnames(stage1_background))
+
+cat("--- adult natural mortality, per year ---\n")
+cat(sprintf("%-22s %8s %10s %12s %10s\n", "species", "target",
+            "pred+seal", "background", "(Stage 1)"))
+for (species in species_names) {
+  cat(sprintf("%-22s %8.2f %10.3f %12.3f %10.3f\n", species,
+              target_adult_natural_mortality[species],
+              existing_adult_mortality[species],
+              new_background_rate[species], stage1_background[species, 1]))
+}
+cat("\n")
+
 # ---- Calibrate ---------------------------------------------------------------
 
 # Quietly, because therMizer warns on every call that it cannot rebalance the
@@ -339,6 +425,18 @@ resource_shift <- max(abs(params_final@initial_n_pp -
 cat(sprintf("resource still at the COBALT level: max relative shift %.2e\n",
             resource_shift))
 stopifnot(resource_shift < 1e-8)
+
+# The predation part of adult mortality shifts as the calibration moves the fish
+# around, so report what adults actually end up with against the target.
+achieved_adult_natural_mortality <-
+  adult_predation_and_seal_mortality(params_final) +
+  ext_mort(params_final)[, 1]
+cat("\nadult natural mortality achieved after calibration (target in brackets):\n")
+for (species in species_names) {
+  cat(sprintf("  %-22s %.2f (%.2f)\n", species,
+              achieved_adult_natural_mortality[species],
+              target_adult_natural_mortality[species]))
+}
 
 saveRDS(params_final, output_file)
 cat(sprintf("\nwrote %s\n", output_file))
