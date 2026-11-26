@@ -1,7 +1,7 @@
 suppressMessages({library(mizer); library(therMizer)})
 source("Ess_Fishmip_data/Useful_functions.R")
 quiet <- function(x) suppressWarnings(suppressMessages(x))
-p0 <- readRDS("Ess_Fishmip_data/params_GFDL_steady.RDS")           # FishMIP model, seals as a gear
+p0 <- readRDS(Sys.getenv("BASE_PARAMS", "Ess_Fishmip_data/params_GFDL_steady.RDS"))           # FishMIP model, seals as a gear
 L <- readRDS("/Users/juliab6/Desktop/Ez June 2026/ESS_Paper2_climate/output/paper2_base_LOCKED.rds")
 g <- L@given_species_params; g$w_repro_max[is.na(g$w_repro_max)] <- g$w_max[is.na(g$w_repro_max)]; L@given_species_params <- g; L <- quiet(validParams(L))
 fish <- as.character(p0@species_params$species)

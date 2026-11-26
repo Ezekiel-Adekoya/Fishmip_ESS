@@ -2,7 +2,7 @@ suppressMessages({library(mizer); library(therMizer)})
 source("Ess_Fishmip_data/Useful_functions.R")
 quiet <- function(x) suppressWarnings(suppressMessages(x)); area <- 146360555008; sc <- Sys.getenv("SC")
 S <- readRDS(file.path(sc, "seal_structure.rds")); p <- S$p; L <- S$L; fish <- S$fish; n0 <- S$n0; N0 <- S$N0
-p0 <- readRDS("Ess_Fishmip_data/params_GFDL_steady.RDS")
+p0 <- readRDS(Sys.getenv("BASE_PARAMS", "Ess_Fishmip_data/params_GFDL_steady.RDS"))
 dg <- readRDS("/Users/juliab6/Desktop/Ez June 2026/ESS_Restructured/Ess_data/seal_abundance_digitised.RDS")
 cat("digitised seals (thousand):", paste(sprintf("%d %.0f", c(1960,1970,1978,1981,1990,2000,2010), dg$scotian_mean[match(c(1960,1970,1978,1981,1990,2000,2010), dg$year)]), collapse=" | "), "\n")
 target_seals <- mean(dg$scotian_mean[dg$year %in% 1978:1981]); cat("calibration target, 1978-81 mean:", round(target_seals,1), "thousand\n")

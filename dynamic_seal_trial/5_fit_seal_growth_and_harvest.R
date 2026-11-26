@@ -1,5 +1,8 @@
 suppressMessages(library(mizer)); quiet <- function(x) suppressWarnings(suppressMessages(x)); sc <- Sys.getenv("SC")
-C <- readRDS(file.path(sc, "seal_calibrated.rds")); full <- C$params
+# The full model to take the seal from, and the feeding level to fit its demography at.
+# Defaults are the first trial's; script 8 writes seal_on_bowen_diet.rds with both.
+seal_source <- Sys.getenv("SEAL_SOURCE", "seal_calibrated.rds")
+C <- readRDS(file.path(sc, seal_source)); full <- C$params
 dg <- readRDS("/Users/juliab6/Desktop/Ez June 2026/ESS_Restructured/Ess_data/seal_abundance_digitised.RDS"); counts <- setNames(dg$scotian_mean, dg$year)[as.character(1961:2010)]
 # ---- a seal-only model on the same size grid, fed at a fixed feeding level ----
 row <- as.data.frame(full@species_params["Grey Seal", ]); keep <- c("species","w_min","w_mat","w_max","beta","sigma","h","ks","k","z0","alpha","n","p","w_mat25","w_repro_max","m","erepro","R_max")
@@ -8,7 +11,7 @@ gp <- data.frame(species="Grey Seal", gear="Seal_Harvest", sel_func="knife_edge"
 dx <- log10(full@w[2]/full@w[1]); first_bin <- full@w[which(full@w <= 16000 * (1 + 1e-9)) |> max()]; row$w_min <- first_bin
 p <- quiet(newMultispeciesParams(row, gear_params=transform(gp, knife_edge_size=first_bin), initial_effort=c(Seal_Harvest=0), min_w=first_bin, max_w=max(full@w), no_w=round(log10(max(full@w)/first_bin)/dx) + 1, n=3/4))
 cat("seal-only grid:", length(p@w), "bins from", round(min(p@w)), "to", round(max(p@w)), "g, same spacing as the full model:", isTRUE(all.equal(log10(p@w[2]/p@w[1]), dx)), "\n")
-feeding_level <- 0.40; ee <- ext_encounter(p); ee[1, ] <- feeding_level/(1-feeding_level) * row$h * p@w^row$n; ext_encounter(p) <- ee
+feeding_level <- if (is.null(C$seal_feeding_level)) 0.40 else C$seal_feeding_level; ee <- ext_encounter(p); ee[1, ] <- feeding_level/(1-feeding_level) * row$h * p@w^row$n; ext_encounter(p) <- ee
 cat("seal-only model: feeding level", round(mean(getFeedingLevel(p)[1, p@w >= 16000]), 2), "| background mortality", round(row$z0, 3), "per year | matures at", row$w_mat/1000, "kg\n")
 numbers <- function(n) sum(n * p@dw)/1000
 set_demography <- function(erepro, R_max) { q <- p; q@species_params$erepro <- erepro; q@species_params$R_max <- R_max; q }
