@@ -4,13 +4,14 @@
 # 06 calibrates the model at a steady state (1978-1981 averages). Nothing in 06
 # is tuned against how catch and biomass CHANGE through time. This script does
 # that next step: it estimates five parameters that only act after the
-# calibration period, by minimising the mismatch with the observed series.
+# calibration period, plus a starting abundance for each species, by minimising
+# the mismatch with the observed series.
 #
-# The calibrated steady state is not touched. Every parameter below is defined
-# so that it has no effect in 1978-1981, so 06's fit stays exactly as it was and
-# the two steps cannot fight each other.
+# The calibrated parameters are not touched. The five dynamic parameters below
+# are defined so that they have no effect in 1978-1981, and the starting
+# abundances change where the model begins, not how it behaves.
 #
-# THE FIVE PARAMETERS
+# THE FIVE DYNAMIC PARAMETERS
 #   1. seal_rise_multiplier   how steeply seal mortality increases as seal
 #                             effort rises above its 1978-1981 level
 #   2. seal_saturation_effort the size of rise at which that increase is half
@@ -28,8 +29,24 @@
 # exactly that respect (handover sections 11, 14 and 17). They are estimated
 # here instead of picked.
 #
+# THE STARTING MULTIPLIERS
+# One multiplier per fitted species, applied to its abundance at the start of
+# 1961. Why they are needed: the model is calibrated to 1978-1981 but run from
+# 1861, and effort before 1978 differs from the 1978-1981 average, so by the
+# time the data begin some species have drifted far from the state they were
+# calibrated at. Spiny dogfish arrives in 1978 at 1% of its calibrated biomass
+# and thorny skate at nearly three times it, and the slow species never recover
+# from that within the data period. A multiplier lets the data say where each
+# species should start.
+#
+# They are applied in 1961, not 1978, because FishMIP output starts in 1961 and
+# the correction should be in place for the whole submitted period. Species
+# that turn over quickly forget their start within a decade; their multipliers
+# are not pinned down by data from 1970 on and should stay near 1. The script
+# reports which ones moved and how much the fit depends on them.
+#
 # WHAT IS FITTED TO WHAT
-# Survey biomass and fishery catch by species, 1978-2004, for the 16 species
+# Survey biomass and fishery catch by species, 1970-2004, for the 16 species
 # whose survey biomass carries no catchability multiplier. Catch means the four
 # fishing gears only; seals are a gear in this model and what they eat is not
 # catch.
@@ -48,9 +65,8 @@
 # species and each variable first, so a species with many survey years does not
 # outweigh one with few.
 #
-# Every run starts from the model state in 1978 taken from 07's projection. The
-# parameters cannot change anything before then, so nothing is lost and one
-# evaluation takes about a second.
+# Every run starts from the model state in 1961 taken from 07's projection, so
+# the long spin-up is not repeated and one evaluation takes a second or two.
 #
 # Run from the project root, after 06 and 07:
 #   Rscript 10.Fit_dynamics_to_time_series.R
@@ -68,7 +84,8 @@ source("Ess_Fishmip_data/Useful_functions.R")   # gaussian_sizeweight() for the 
 region_area_m2 <- 146360555008
 multiplied_forage_species <- c("Atlantic Herring", "Sand Lance", "Capelin")
 
-first_fitted_year  <- 1978
+first_run_year     <- 1961      # start of the real forcing and of FishMIP output
+first_fitted_year  <- 1970      # the survey and catch series begin here
 last_fitted_year   <- 2004      # 2005-2010 are held out, as the FishMIP protocol asks
 last_year          <- 2010
 cod_mortality_starts <- 1990
@@ -86,15 +103,15 @@ params <- baseline_sim@params
 species_names <- as.character(params@species_params$species)
 fitted_species <- setdiff(species_names, multiplied_forage_species)
 
-state_index_1978 <- which(dimnames(baseline_sim@n)[[1]] == as.character(first_fitted_year))
-abundance_1978 <- baseline_sim@n[state_index_1978, , ]
-resource_1978  <- baseline_sim@n_pp[state_index_1978, ]
+start_index <- which(dimnames(baseline_sim@n)[[1]] == as.character(first_run_year))
+abundance_at_start <- baseline_sim@n[start_index, , ]
+resource_at_start  <- baseline_sim@n_pp[start_index, ]
 
 effort_table <- read.csv("Ess_Fishmip_data/Effort_spin_1861_2010.csv",
                          check.names = FALSE)
 effort_by_year <- as.matrix(effort_table[, setdiff(names(effort_table), "year")])
 rownames(effort_by_year) <- as.character(effort_table$year)
-effort_by_year <- effort_by_year[as.character(first_fitted_year:last_year),
+effort_by_year <- effort_by_year[as.character(first_run_year:last_year),
                                  names(params@initial_effort)]
 
 # Seal effort at the calibration state. The seal parameters only act on effort
@@ -129,18 +146,22 @@ reshape_seal_effort <- function(seal_effort, seal_rise_multiplier,
 
 run_model <- function(seal_rise_multiplier, seal_saturation_effort,
                       cod_extra_mortality, cod_moratorium_factor,
-                      haddock_moratorium_factor) {
+                      haddock_moratorium_factor, start_multipliers) {
   effort <- effort_by_year
   effort[, "Seals"] <- reshape_seal_effort(effort[, "Seals"],
                                            seal_rise_multiplier,
                                            seal_saturation_effort)
 
   # Three stretches of years, because two of the parameters switch on part way.
-  stretches <- list(c(first_fitted_year, cod_mortality_starts),
+  stretches <- list(c(first_run_year, cod_mortality_starts),
                     c(cod_mortality_starts, moratorium_starts),
                     c(moratorium_starts, last_year))
-  abundance <- abundance_1978
-  resource  <- resource_1978
+  # Each fitted species starts 1961 at its spun-up abundance times its
+  # multiplier, the same factor at every size.
+  abundance <- abundance_at_start
+  abundance[names(start_multipliers), ] <-
+    abundance[names(start_multipliers), ] * start_multipliers
+  resource  <- resource_at_start
   biomass_parts <- list()
   catch_parts   <- list()
 
@@ -206,20 +227,29 @@ mismatch <- function(run, years) {
          error_by_species(run$catch,   observed_catch,   years)))
 }
 
-# The optimiser works on an unbounded-friendly scale: logs for the two seal
-# parameters, which span orders of magnitude, and plain values for the rest.
-parameter_names <- c("log_seal_rise_multiplier", "log_seal_saturation_effort",
-                     "cod_extra_mortality", "cod_moratorium_factor",
-                     "haddock_moratorium_factor")
-lower_bounds <- c(log(0.01), log(0.005), 0,   0.001, 0.001)
-upper_bounds <- c(log(5),    log(1000),  1.5, 1,     1)
+# The optimiser works on scales where a unit step means something similar for
+# every parameter: natural logs for the two seal parameters, plain values for
+# the cod and moratorium ones, and log10 for the starting multipliers (so 1
+# means ten times, -1 means a tenth).
+dynamic_parameter_names <- c("log_seal_rise_multiplier",
+                             "log_seal_saturation_effort",
+                             "cod_extra_mortality", "cod_moratorium_factor",
+                             "haddock_moratorium_factor")
+number_of_dynamic <- length(dynamic_parameter_names)
+multiplier_positions <- number_of_dynamic + seq_along(fitted_species)
+lower_bounds <- c(log(0.01), log(0.005), 0,   0.001, 0.001,
+                  rep(-3, length(fitted_species)))
+upper_bounds <- c(log(5),    log(1000),  1.5, 1,     1,
+                  rep(3, length(fitted_species)))
 
 run_from_vector <- function(values) {
   run_model(seal_rise_multiplier      = exp(values[1]),
             seal_saturation_effort    = exp(values[2]),
             cod_extra_mortality       = values[3],
             cod_moratorium_factor     = values[4],
-            haddock_moratorium_factor = values[5])
+            haddock_moratorium_factor = values[5],
+            start_multipliers = setNames(10^values[multiplier_positions],
+                                         fitted_species))
 }
 
 fitted_years <- first_fitted_year:last_fitted_year
@@ -233,7 +263,7 @@ objective <- function(values) {
 # "No change": seal effort as in the file, no extra cod mortality, no
 # moratorium effect. A saturation scale of 1000 is about a thousand times the
 # largest rise in the effort series, so it is no saturation to within 0.1%.
-no_change <- c(log(1), log(1000), 0, 1, 1)
+no_change <- c(log(1), log(1000), 0, 1, 1, rep(0, length(fitted_species)))
 
 # Check that the "no change" run is the 07 run, so any improvement below comes
 # from the parameters and not from a difference in how the run is assembled.
@@ -251,13 +281,19 @@ stopifnot(restart_difference < 0.02)
 
 # ---- Fit ---------------------------------------------------------------------
 
-# Several starting points, because a five-parameter fit to noisy series can have
-# more than one basin. The best result is kept and the others are reported, so
-# it is visible whether they agree.
+# Several starting points, because a fit with this many parameters to noisy
+# series can have more than one basin. The best result is kept and the others
+# are reported, so it is visible whether they agree. The third start gives the
+# species known to be displaced a head start in the right direction.
+informed_multipliers <- setNames(rep(0, length(fitted_species)), fitted_species)
+informed_multipliers[c("Spiny Dogfish", "Thorny Skate", "Longhorn Sculpin",
+                       "Winter Skate")] <- c(1.5, -0.4, -0.3, 0.3)
 starting_points <- list(
   no_change            = no_change,
-  seals_saturate_early = c(log(1),   log(0.1), 0.3, 0.1, 0.1),
-  weak_seals_high_codM = c(log(0.3), log(1),   0.6, 0.05, 0.05))
+  seals_saturate_early = c(log(1), log(0.1), 0.3, 0.1, 0.1,
+                           rep(0, length(fitted_species))),
+  informed_starts      = c(log(0.5), log(1000), 0.6, 0.3, 0.2,
+                           unname(informed_multipliers)))
 
 cluster <- makeCluster(min(length(lower_bounds) * 2 + 1, detectCores() - 1),
                        type = "FORK")
@@ -265,7 +301,7 @@ setDefaultCluster(cluster)
 fits <- lapply(names(starting_points), function(start_name) {
   fit <- optimParallel(par = starting_points[[start_name]], fn = objective,
                        lower = lower_bounds, upper = upper_bounds,
-                       control = list(maxit = 60, factr = 1e9))
+                       control = list(maxit = 150, factr = 1e8))
   cat(sprintf("start '%s': mismatch %.4f -> %.4f after %d evaluations\n",
               start_name, objective(starting_points[[start_name]]), fit$value,
               fit$counts[["function"]]))
@@ -280,11 +316,16 @@ natural_scale <- function(values) c(
   seal_saturation_effort    = exp(values[2]),
   cod_extra_mortality       = values[3],
   cod_moratorium_factor     = values[4],
-  haddock_moratorium_factor = values[5])
+  haddock_moratorium_factor = values[5],
+  setNames(10^values[multiplier_positions], paste0("start_x_", fitted_species)))
 
-cat("\nfitted values from each starting point:\n")
-print(round(t(sapply(fits, function(fit) c(natural_scale(fit$par),
-                                            mismatch = fit$value))), 4))
+cat("\nfitted dynamic parameters from each starting point:\n")
+print(round(t(sapply(fits, function(fit) c(
+  natural_scale(fit$par)[seq_len(number_of_dynamic)], mismatch = fit$value))), 4))
+cat("\nfitted starting multipliers from each starting point:\n")
+multiplier_table <- sapply(fits, function(fit) 10^fit$par[multiplier_positions])
+rownames(multiplier_table) <- fitted_species
+print(signif(multiplier_table, 3))
 
 fitted_values <- natural_scale(best_fit$par)
 fitted_run <- run_from_vector(best_fit$par)
@@ -297,8 +338,10 @@ fitted_run <- run_from_vector(best_fit$par)
 cat(sprintf("\nmismatch over the fitted years (%d-%d); lower is better\n",
             first_fitted_year, last_fitted_year))
 cat(sprintf("  %-34s %.4f\n", "no change (the 07 run)", objective(no_change)))
-cat(sprintf("  %-34s %.4f\n", "all five fitted", best_fit$value))
-parameter_groups <- list("without seal saturation (1 and 2)" = 1:2,
+cat(sprintf("  %-34s %.4f\n", "everything fitted", best_fit$value))
+parameter_groups <- list("without starting multipliers"      = multiplier_positions,
+                         "without the five dynamic ones"     = seq_len(number_of_dynamic),
+                         "without seal saturation (1 and 2)" = 1:2,
                          "without extra cod mortality (3)"   = 3,
                          "without cod moratorium (4)"        = 4,
                          "without haddock moratorium (5)"    = 5)
@@ -307,6 +350,23 @@ for (group_name in names(parameter_groups)) {
   values[parameter_groups[[group_name]]] <- no_change[parameter_groups[[group_name]]]
   cat(sprintf("  %-34s %.4f\n", group_name, objective(values)))
 }
+
+# How much each starting multiplier matters on its own: reset one species at a
+# time to a multiplier of 1 and see what the fit loses. Those that cost nothing
+# are not identified by the data and their fitted values should not be read as
+# meaningful.
+cat("\nstarting multipliers: fitted value, and the mismatch lost if reset to 1\n")
+multiplier_cost <- sapply(seq_along(fitted_species), function(i) {
+  values <- best_fit$par
+  values[multiplier_positions[i]] <- 0
+  objective(values) - best_fit$value
+})
+multiplier_report <- data.frame(
+  species = fitted_species,
+  start_multiplier = signif(10^best_fit$par[multiplier_positions], 3),
+  mismatch_lost_if_reset = round(multiplier_cost, 4))
+print(multiplier_report[order(-multiplier_report$mismatch_lost_if_reset), ],
+      row.names = FALSE)
 
 # ---- Fit in the earlier and the later years ----------------------------------
 
@@ -358,7 +418,8 @@ observed_relative <- function(species) {
 cat("\nbiomass in 1994-2004 relative to 1978-1981\n")
 cat(sprintf("  %-20s %10s %8s %9s\n", "species", "no change", "fitted", "observed"))
 for (species in c("Atlantic Cod", "Haddock", "American Plaice", "Witch Flounder",
-                  "Yellowtail Flounder", "Winter Skate", "Thorny Skate", "Monkfish")) {
+                  "Yellowtail Flounder", "Winter Skate", "Thorny Skate", "Monkfish",
+                  "Spiny Dogfish", "Pollock")) {
   cat(sprintf("  %-20s %10.2f %8.2f %9.2f\n", species,
               relative_to_calibration(baseline_run$biomass, species),
               relative_to_calibration(fitted_run$biomass, species),
@@ -374,7 +435,8 @@ cat(sprintf("\ntotal biomass of the 16 species in 2010: no change %.2f, fitted %
 
 write.csv(data.frame(parameter = names(fitted_values),
                      fitted_value = signif(unname(fitted_values), 5),
-                     no_change_value = c(1, Inf, 0, 1, 1)),
+                     no_change_value = c(1, Inf, 0, 1, 1,
+                                         rep(1, length(fitted_species)))),
           fitted_values_file, row.names = FALSE)
 saveRDS(list(biomass = fitted_run$biomass, catch = fitted_run$catch,
              baseline_biomass = baseline_run$biomass,
