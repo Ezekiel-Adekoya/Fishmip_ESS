@@ -1,0 +1,20 @@
+"species","gear","sel_func","l50","l25","l50_right","l25_right","catchability"
+"Atlantic Cod","Bottom_Trawl","sigmoid_length",56,45,NA,NA,0.03
+"Haddock","Bottom_Trawl","sigmoid_length",38,28,NA,NA,0.1
+"White Hake","Fixed_Gear","sigmoid_length",45,38,NA,NA,0.05
+"Red Hake","Small_Mesh","sigmoid_length",23,18,NA,NA,0.1
+"Silver Hake","Small_Mesh","sigmoid_length",23,18,NA,NA,0.1
+"Pollock","Bottom_Trawl","sigmoid_length",45,38,NA,NA,0.08
+"Redfish Unseparated","Bottom_Trawl","sigmoid_length",22,16,NA,NA,0.05
+"American Plaice","Bottom_Trawl","sigmoid_length",30,25,NA,NA,0.1
+"Yellowtail Flounder","Bottom_Trawl","sigmoid_length",30,24,NA,NA,0.1
+"Witch Flounder","Bottom_Trawl","sigmoid_length",32,24,NA,NA,0.05
+"Atlantic Herring","Pelagic","double_sigmoid_length",20,15,32,38,0.1
+"Capelin","Pelagic","double_sigmoid_length",14,10,20,24,0.02
+"Thorny Skate","Bottom_Trawl","sigmoid_length",55,42,NA,NA,0.04
+"Winter Skate","Bottom_Trawl","sigmoid_length",50,40,NA,NA,0.04
+"Spiny Dogfish","Fixed_Gear","sigmoid_length",70,58,NA,NA,0.04
+"Monkfish","Bottom_Trawl","sigmoid_length",50,38,NA,NA,0.05
+"Sand Lance","Bottom_Trawl","sigmoid_length",15,11,NA,NA,0.02
+"Longhorn Sculpin","Bottom_Trawl","sigmoid_length",24,18,NA,NA,0.03
+"Atlantic Halibut","Fixed_Gear","sigmoid_length",81,70,NA,NA,0.04

@@ -14,3 +14,6 @@ Rplots.pdf
 # the pipeline rather than an input to it. Nothing reads it -- 05 reads the
 # tracked Ess_Fishmip_data/Temp_by_depth_spin.csv instead.
 Temp_by depth.csv
+
+# Simulation output from 07; regenerable and large.
+Ess_Fishmip_data/sims_GFDL_recalibrated.RDS

@@ -384,6 +384,21 @@ stopifnot(
 # intercept scalings, which no longer exist, so the names drop it. The spectra
 # file now holds the ANCHORED resource, which is what 05 must read.
 write.table(out_isimip, file = "Ess_Fishmip_data/GFDL_resource_spectra.dat", quote = FALSE, row.names = TRUE, col.names = TRUE)
+
+# The raw ESM resource as well, with no anchor applied. The anchor exists only
+# because the fish were calibrated against a lower resource than COBALT reports,
+# so it is the right fix only while that calibration is held fixed. Recalibrating
+# the fish in the forced state instead needs the resource COBALT actually gives,
+# which is this file. Both are written so the two approaches can be compared
+# without rerunning this script.
+write.table(spectra_before_anchoring,
+            file = "Ess_Fishmip_data/GFDL_resource_spectra_unanchored.dat",
+            quote = FALSE, row.names = TRUE, col.names = TRUE)
+stopifnot(
+  isTRUE(all.equal(out_isimip - log10(level_anchor_factor),
+                   spectra_before_anchoring)),
+  nrow(spectra_before_anchoring) == nrow(out_isimip)
+)
 write.table(isimip_slope, file = "Ess_Fishmip_data/GFDL_resource_slope.dat", quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
 write.table(isimip_intercept, file = "Ess_Fishmip_data/GFDL_resource_intercept.dat", quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
 ```
