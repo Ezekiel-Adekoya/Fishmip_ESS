@@ -313,7 +313,11 @@ cat(sprintf("biomass: %d/%d species within 2x of observed, median ratio %.3f\n",
             median(biomass_ratio)))
 
 observed_yield <- species_params_final$yield_observed
-modelled_yield <- as.numeric(getYield(params_final))
+# Fishery catch only: seals are a gear in this model, so getYield() would add
+# what seals eat to the catch being compared with landings.
+yield_by_gear <- getYieldGear(params_final)            # gear x species
+fishing_gears <- setdiff(rownames(yield_by_gear), "Seals")
+modelled_yield <- as.numeric(colSums(yield_by_gear[fishing_gears, , drop = FALSE]))
 has_yield_target <- !is.na(observed_yield) & observed_yield > 0
 yield_ratio <- modelled_yield[has_yield_target] / observed_yield[has_yield_target]
 cat(sprintf("yield:   %d/%d species within 2x of observed, median ratio %.3f\n",

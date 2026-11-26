@@ -107,7 +107,16 @@ saveRDS(sim, output_file)
 # ---- Modelled biomass and catch, per species per year ------------------------
 
 modelled_biomass <- getBiomass(sim)      # years x species, grams
-modelled_yield   <- getYield(sim)        # years x species, grams per year
+# Catch must be fishery catch only. Seals are implemented as a gear, so
+# getYield() -- which adds up every gear -- counts what seals eat as if it were
+# landed. By 2005-2010 that is 91% of the "yield" of haddock and 98% for
+# American plaice, and comparing it with NAFO landings made the model look as
+# if it over-predicted catch many times over. Only the fishing gears are summed
+# here, as 05 does.
+fishing_gears <- setdiff(dimnames(getYieldGear(sim))[[2]], "Seals")
+modelled_yield <- apply(getYieldGear(sim)[, fishing_gears, , drop = FALSE],
+                        c(1, 3), sum)          # years x species, grams per year
+cat("catch is summed over:", paste(fishing_gears, collapse = ", "), "\n")
 
 to_long <- function(year_by_species_matrix, value_name) {
   as.data.frame(as.table(year_by_species_matrix)) |>
