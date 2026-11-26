@@ -38,9 +38,18 @@ source("Ess_Fishmip_data/Useful_functions.R")
 
 region_area_m2 <- 146360555008      # Eastern Scotian Shelf
 
-# The same reference window 04 uses to set its anchor, so the two approaches are
-# anchored on the same years and can be compared directly.
-reference_years <- 1978:1981
+# steady() and matchBiomasses() need inputs that are constant in time, and those
+# constants must be the TIME AVERAGE over the same period the calibration targets
+# are averaged over. The observed biomass in species_params is a 1970-2010 mean
+# (it matches the 1970-2010 survey average at a ratio of 0.994), so the forcing
+# and the effort are averaged over 1970-2010 as well.
+#
+# This used to be 1978:1981, borrowed from the window 04 uses for its anchor.
+# That fitted time-averaged targets against a four-year forcing window, which is
+# inconsistent: 1978-81 is 0.1 C warmer than the 1970-2010 mean, and a long way
+# from the 1961-1970 conditions the spin-up repeats (0.5 C cooler, 19% more
+# effort).
+reference_years <- 1970:2010
 
 # steady() needs longer than its default here: a 50-year test run was still
 # moving. The convergence tolerance is left at mizer's default (tol = 0.1 * dt),
@@ -136,6 +145,21 @@ temperature_held_constant <- matrix(
   dimnames = list(time = calibration_time_labels,
                   realm = colnames(ocean_temp_by_year)))
 
+# Effort is held at its time average over the same window, gear by gear, for the
+# same reason. Stage 1's initial_effort turns out to be exactly the 1978-1981
+# mean, so leaving it alone would quietly reintroduce the four-year window.
+effort_table <- read.csv("Ess_Fishmip_data/Effort_spin_1861_2010.csv",
+                         check.names = FALSE)
+effort_in_window <- effort_table[effort_table$year %in% reference_years,
+                                 setdiff(names(effort_table), "year"),
+                                 drop = FALSE]
+time_averaged_effort <- colMeans(effort_in_window)
+stopifnot(setequal(names(time_averaged_effort), names(params@initial_effort)))
+cat(sprintf("effort: Stage-1 initial_effort %.4f  ->  %d-%d mean %.4f\n",
+            sum(params@initial_effort), min(reference_years),
+            max(reference_years), sum(time_averaged_effort)))
+initial_effort(params) <- time_averaged_effort[names(params@initial_effort)]
+
 params_thermizer <- upgradeTherParams(
   params,
   ocean_temp               = temperature_held_constant,
@@ -144,6 +168,30 @@ params_thermizer <- upgradeTherParams(
   exposure_array           = exposure_array,
   aerobic_effect           = TRUE,
   metabolism_effect        = TRUE)
+
+# Put the model's own resource state AT the time-averaged COBALT level and hold
+# it there while calibrating.
+#
+# This step matters more than anything else in the script. Attaching n_pp_array
+# only tells therMizer what to feed the model during project(); it does not
+# change the resource the params object currently holds, and steady() solves
+# the fish around whatever resource it is handed. Without this, steady() fitted
+# the fish to Stage 1's old resource (about a fifth of COBALT), and the moment
+# project() swapped the COBALT resource in the fish had four times the food and
+# biomass tripled within ten years. That looked like the model refusing to stay
+# at its calibrated state; it was a calibration done on the wrong food level.
+time_averaged_resource_density <- 10^resource_at_reference / params@dw_full
+time_averaged_resource_density[!is.finite(time_averaged_resource_density)] <- 0
+# therMizer's plankton_forcing() zeroes the resource at and above the cutoff, so
+# the calibration resource has to do the same or the two will not agree.
+time_averaged_resource_density[
+  params@w_full >= params@resource_params$w_pp_cutoff] <- 0
+names(time_averaged_resource_density) <- names(params@initial_n_pp)
+
+initialNResource(params_thermizer) <- time_averaged_resource_density
+# Constant in time, as steady() and matchBiomasses() require. 07 switches back
+# to the year-by-year forcing for the dynamic run.
+resource_dynamics(params_thermizer) <- "resource_constant"
 
 # How much bigger the COBALT resource is than the one Stage 1 was fitted to,
 # over the bins the model sees. This is the gap the recalibration has to absorb.
@@ -183,13 +231,13 @@ report <- function(label, p) {
 }
 
 cat("--- calibration ---\n")
-report("start (Stage-1 R_max, COBALT food)", params_thermizer)
+report("start (Stage-1 fish, COBALT food)", params_thermizer)
 
-# calibrateBiomass scales the whole system so total modelled biomass matches
-# total observed biomass. It is the single biggest correction and comes first.
-params_calibrated <- report("after calibrateBiomass",
-                            calibrateBiomass(params_thermizer))
-params_calibrated <- report("after steady", solve_steady(params_calibrated))
+# calibrateBiomass() is deliberately NOT used. It rescales the whole system,
+# resource included, to match total observed biomass -- which would move the
+# resource off the COBALT level this script exists to keep. Only the fish are
+# allowed to adjust here.
+params_calibrated <- report("after steady", solve_steady(params_thermizer))
 
 # matchBiomasses moves each species' R_max toward its own observed biomass;
 # steady then re-solves the community around the new values.
@@ -283,6 +331,15 @@ for (i in worst) {
   cat(sprintf("  %-22s x%.2f\n",
               species_params_final$species[has_target][i], biomass_ratio[i]))
 }
+
+# The resource must still be exactly the time-averaged COBALT spectrum. If any
+# calibration step rescaled it, the fit is against the wrong food level again.
+resource_shift <- max(abs(params_final@initial_n_pp -
+                          time_averaged_resource_density)) /
+  max(time_averaged_resource_density)
+cat(sprintf("resource still at the COBALT level: max relative shift %.2e\n",
+            resource_shift))
+stopifnot(resource_shift < 1e-8)
 
 saveRDS(params_final, output_file)
 cat(sprintf("\nwrote %s\n", output_file))
