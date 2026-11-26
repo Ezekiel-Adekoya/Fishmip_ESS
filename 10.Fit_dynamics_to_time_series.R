@@ -30,11 +30,19 @@
 #
 # WHAT IS FITTED TO WHAT
 # Survey biomass and fishery catch by species, 1978-2004, for the 16 species
-# whose survey biomass carries no catchability multiplier. 2005-2010 is NOT
-# used: the FishMIP regional protocol (Ortega-Cisneros et al. 2025, step 6)
-# holds those years back, and they are reported at the end as the test of
-# whether the estimates predict. Catch means the four fishing gears only; seals
-# are a gear in this model and what they eat is not catch.
+# whose survey biomass carries no catchability multiplier. Catch means the four
+# fishing gears only; seals are a gear in this model and what they eat is not
+# catch.
+#
+# 2005-2010 IS HELD OUT, as the FishMIP regional protocol asks (Ortega-Cisneros
+# et al. 2025, step 6: those years of catch are kept back to test predictive
+# skill). Scores for 2005-2010 are printed separately at the end and are a
+# genuine out-of-sample test.
+#
+# Fitting all years instead (last_fitted_year <- 2010) was tried once for
+# comparison on 2026-11-27. It gave similar parameter values and a much better
+# 2005-2010 fit, as it must, but leaves nothing to test the model against. The
+# numbers are in handover section 22.
 #
 # The error is the squared difference of log10 values, averaged within each
 # species and each variable first, so a species with many survey years does not
@@ -61,7 +69,7 @@ region_area_m2 <- 146360555008
 multiplied_forage_species <- c("Atlantic Herring", "Sand Lance", "Capelin")
 
 first_fitted_year  <- 1978
-last_fitted_year   <- 2004      # 2005-2010 are held out by the protocol
+last_fitted_year   <- 2004      # 2005-2010 are held out, as the FishMIP protocol asks
 last_year          <- 2010
 cod_mortality_starts <- 1990
 moratorium_starts    <- 1993
@@ -286,7 +294,8 @@ fitted_run <- run_from_vector(best_fit$par)
 # Put each fitted parameter back to its "no change" value in turn and see how
 # much of the improvement is lost. A parameter whose removal costs almost
 # nothing is not supported by the data, whatever value the optimiser gave it.
-cat("\nmismatch over the fitted years (1978-2004); lower is better\n")
+cat(sprintf("\nmismatch over the fitted years (%d-%d); lower is better\n",
+            first_fitted_year, last_fitted_year))
 cat(sprintf("  %-34s %.4f\n", "no change (the 07 run)", objective(no_change)))
 cat(sprintf("  %-34s %.4f\n", "all five fitted", best_fit$value))
 parameter_groups <- list("without seal saturation (1 and 2)" = 1:2,
@@ -299,7 +308,7 @@ for (group_name in names(parameter_groups)) {
   cat(sprintf("  %-34s %.4f\n", group_name, objective(values)))
 }
 
-# ---- Fit in the fitted years and in the held-out years -----------------------
+# ---- Fit in the earlier and the later years ----------------------------------
 
 skill_line <- function(modelled_matrix, observed_table, years) {
   observed_rows <- observed_table[observed_table$Year %in% years, ]
@@ -319,18 +328,22 @@ skill_line <- function(modelled_matrix, observed_table, years) {
           median(per_species$rmse))
 }
 
-held_out_years <- (last_fitted_year + 1):last_year
+# The two periods are always reported separately so results stay comparable
+# whichever years were fitted. The label says whether the later one was used.
+earlier_years <- first_fitted_year:2004
+later_years   <- 2005:last_year
+later_label <- if (last_fitted_year >= last_year) "also fitted" else "held out"
 cat("\n16 species without survey multipliers; bias is modelled/observed\n")
 for (run_name in c("no change", "fitted")) {
   run <- if (run_name == "no change") baseline_run else fitted_run
-  cat(sprintf("%-10s biomass %d-%d: %s\n", run_name, first_fitted_year,
-              last_fitted_year, skill_line(run$biomass, observed_biomass, fitted_years)))
-  cat(sprintf("%-10s biomass %d-%d (held out): %s\n", run_name, last_fitted_year + 1,
-              last_year, skill_line(run$biomass, observed_biomass, held_out_years)))
-  cat(sprintf("%-10s catch   %d-%d: %s\n", run_name, first_fitted_year,
-              last_fitted_year, skill_line(run$catch, observed_catch, fitted_years)))
-  cat(sprintf("%-10s catch   %d-%d (held out): %s\n", run_name, last_fitted_year + 1,
-              last_year, skill_line(run$catch, observed_catch, held_out_years)))
+  cat(sprintf("%-10s biomass %d-2004: %s\n", run_name, first_fitted_year,
+              skill_line(run$biomass, observed_biomass, earlier_years)))
+  cat(sprintf("%-10s biomass 2005-%d (%s): %s\n", run_name, last_year, later_label,
+              skill_line(run$biomass, observed_biomass, later_years)))
+  cat(sprintf("%-10s catch   %d-2004: %s\n", run_name, first_fitted_year,
+              skill_line(run$catch, observed_catch, earlier_years)))
+  cat(sprintf("%-10s catch   2005-%d (%s): %s\n", run_name, last_year, later_label,
+              skill_line(run$catch, observed_catch, later_years)))
 }
 
 relative_to_calibration <- function(biomass_matrix, species) {
