@@ -9,9 +9,14 @@
 #   1967-1990  the same, less the fitted harvest
 #   1991-2010  no harvest
 #
-# Nothing from script 10 is used: no starting multipliers, no extra cod
-# mortality, no change in catchability after the moratorium. This run shows
-# what the seal does on its own account.
+# Nothing from script 10 is used: no starting multipliers and no change in
+# catchability after the moratorium. As it stands the run shows what the seal
+# does on its own account.
+#
+# With FIT_COD_MORTALITY=1 an extra natural mortality on mature cod is added
+# as an episode: it starts in 1990, as in script 10, and lasts a fitted number
+# of years, after which it is switched off. Its level and its length are fitted
+# to the cod survey biomass for 1970-2004. 2005-2010 stay held out.
 #
 # Writes dynamic_seal_run.rds to the SC folder and prints the comparison with
 # the seal counts, the Bowen & Harrison diet and the survey and catch series.
@@ -25,6 +30,8 @@ region_area_m2 <- 146360555008
 work_folder <- Sys.getenv("SC")
 multiplied_forage_species <- c("Atlantic Herring", "Sand Lance", "Capelin")
 harvest_years <- 1967:1990
+last_fitted_year <- 2004           # 2005-2010 are held out, as in script 10
+cod_mortality_starts <- 1990       # the same starting year as script 10
 
 first_build <- readRDS(file.path(work_folder, "seal_calibrated.rds"))   # forcing arrays
 calibrated  <- readRDS(file.path(work_folder, "seal_on_bowen_diet.rds"))
@@ -73,25 +80,53 @@ abundance_in_1961["Grey Seal", ] <- abundance_in_1961["Grey Seal", ] *
 
 # ---- 1961-2010 with seal growth and harvest ----------------------------------
 
+# The extra cod mortality in each year of the run. It is at its full level for
+# every whole year of the episode, a fraction of it in the year the episode
+# ends part-way through, and zero before and after.
+cod_extra_mortality_by_year <- function(run_years, cod_extra_mortality, cod_episode_years) {
+  years_into_episode <- run_years - cod_mortality_starts
+  share_of_year_in_episode <- pmin(pmax(cod_episode_years - years_into_episode, 0), 1)
+  ifelse(years_into_episode < 0, 0, cod_extra_mortality * share_of_year_in_episode)
+}
+
 # One run from the 1961 state for a given seal reproductive efficiency and
-# harvest rate. Returns the three stretches of simulation.
-run_from_1961 <- function(seal_erepro, seal_harvest_rate) {
+# harvest rate, and optionally an episode of extra mortality on mature cod.
+# The years are grouped into stretches over which nothing changes, and the
+# function returns one simulation per stretch.
+run_from_1961 <- function(seal_erepro, seal_harvest_rate,
+                          cod_extra_mortality = 0, cod_episode_years = 0) {
   growing_params <- params_dynamic
   growing_params@species_params$erepro[is_seal] <- seal_erepro
   growing_params@species_params$R_max[is_seal]  <- demography[["R_max"]]
-  stretches <- list(list(from = 1961, to = 1967, harvest = 0),
-                    list(from = 1967, to = 1991, harvest = seal_harvest_rate),
-                    list(from = 1991, to = 2010, harvest = 0))
+  cod_is_mature <- growing_params@w >=
+    growing_params@species_params$w_mat[all_species == "Atlantic Cod"]
+
+  # The settings for each year that a projection step starts in.
+  run_years <- 1961:2009
+  seal_harvest_in_year <- ifelse(run_years %in% harvest_years, seal_harvest_rate, 0)
+  cod_extra_in_year <- cod_extra_mortality_by_year(run_years, cod_extra_mortality,
+                                                   cod_episode_years)
+  # A new stretch starts whenever either setting changes.
+  setting_changes <- c(TRUE, diff(seal_harvest_in_year) != 0 | diff(cod_extra_in_year) != 0)
+  stretch_first_years <- run_years[setting_changes]
+  stretch_last_years  <- c(stretch_first_years[-1], 2010)
+
   abundance <- abundance_in_1961
   resource  <- resource_in_1961
   stretch_simulations <- list()
-  for (stretch in stretches) {
+  for (stretch_number in seq_along(stretch_first_years)) {
+    first_year <- stretch_first_years[stretch_number]
+    last_year  <- stretch_last_years[stretch_number]
     stretch_params <- growing_params
-    stretch_params@mu_b["Grey Seal", ] <- growing_params@mu_b["Grey Seal", ] + stretch$harvest
+    stretch_params@mu_b["Grey Seal", ] <- growing_params@mu_b["Grey Seal", ] +
+      seal_harvest_in_year[run_years == first_year]
+    stretch_params@mu_b["Atlantic Cod", cod_is_mature] <-
+      growing_params@mu_b["Atlantic Cod", cod_is_mature] +
+      cod_extra_in_year[run_years == first_year]
     stretch_params@initial_n[]    <- abundance
     stretch_params@initial_n_pp[] <- resource
     simulation <- quietly(project(
-      stretch_params, effort = effort_by_year[as.character(stretch$from:stretch$to), ],
+      stretch_params, effort = effort_by_year[as.character(first_year:last_year), ],
       progress_bar = FALSE))
     stretch_simulations[[length(stretch_simulations) + 1]] <- simulation
     abundance <- simulation@n[dim(simulation@n)[1], , ]
@@ -115,11 +150,25 @@ seal_numbers_in <- function(stretch_simulations) {
 # model, to the counted numbers for 1961-2010.
 seal_erepro <- demography[["erepro"]]
 seal_harvest_rate <- demography[["harvest_rate"]]
-if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
+# Seal rates from an earlier fit can be given from outside, to repeat a run
+# or to start the fit close to its answer.
+if (nzchar(Sys.getenv("SEAL_EREPRO"))) seal_erepro <- as.numeric(Sys.getenv("SEAL_EREPRO"))
+if (nzchar(Sys.getenv("SEAL_HARVEST_RATE"))) {
+  seal_harvest_rate <- as.numeric(Sys.getenv("SEAL_HARVEST_RATE"))
+}
+cod_extra_mortality <- 0
+cod_episode_years <- 0
+fit_seals <- Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1"
+fit_cod_mortality <- Sys.getenv("FIT_COD_MORTALITY", "0") == "1"
+
+# Fits the two seal rates to the counts, with the cod mortality as it stands.
+fit_seal_rates_to_counts <- function() {
   count_years <- as.character(1961:2010)
   mismatch_with_counts <- function(values) {
-    numbers <- tryCatch(seal_numbers_in(run_from_1961(exp(values[1]), max(values[2], 0))),
-                        error = function(e) NULL)
+    numbers <- tryCatch(
+      seal_numbers_in(run_from_1961(exp(values[1]), max(values[2], 0),
+                                    cod_extra_mortality, cod_episode_years)),
+      error = function(e) NULL)
     if (is.null(numbers) || any(!is.finite(numbers)) || any(numbers <= 0)) return(1e6)
     sum((log(numbers[count_years]) - log(seal_counts[count_years]))^2) +
       if (values[2] < 0) 1e3 * values[2]^2 else 0
@@ -129,10 +178,70 @@ if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
   cat(sprintf("seal rates fitted in the full model: erepro %.4f -> %.4f | harvest rate %.3f -> %.3f per year | log RMSE against counts %.3f\n",
               seal_erepro, exp(fit$par[1]), seal_harvest_rate, max(fit$par[2], 0),
               sqrt(fit$value / length(count_years))))
-  seal_erepro <- exp(fit$par[1])
-  seal_harvest_rate <- max(fit$par[2], 0)
+  seal_erepro <<- exp(fit$par[1])
+  seal_harvest_rate <<- max(fit$par[2], 0)
 }
-simulations <- c(list(spin_up), run_from_1961(seal_erepro, seal_harvest_rate))
+
+# Cod survey biomass over the fitted years, and the model's mismatch with it
+# (mean squared difference in log10 biomass).
+cod_survey <- readRDS("Ess_Fishmip_data/biomass_ts.RDS") |>
+  filter(Species == "Atlantic Cod", Biomass > 0,
+         Year >= 1970, Year <= last_fitted_year)
+cod_biomass_in <- function(stretch_simulations) {
+  unlist(lapply(stretch_simulations, function(simulation) {
+    cod <- getBiomass(simulation)[, "Atlantic Cod"]
+    cod[setdiff(names(cod), "2010")]
+  }))
+}
+cod_mismatch_with_survey <- function(level, episode_years) {
+  modelled <- tryCatch(
+    cod_biomass_in(run_from_1961(seal_erepro, seal_harvest_rate, level, episode_years)),
+    error = function(e) NULL)
+  if (is.null(modelled)) return(1e6)
+  modelled <- modelled[as.character(cod_survey$Year)]
+  if (any(!is.finite(modelled)) || any(modelled <= 0)) return(1e6)
+  mean((log10(modelled) - log10(cod_survey$Biomass))^2)
+}
+# The episode can last between 1 year and the whole of 1990-2010 (21 years).
+# Values outside the allowed ranges are pulled back and penalised.
+longest_episode <- 2011 - cod_mortality_starts
+fit_cod_mortality_to_survey <- function() {
+  objective <- function(values) {
+    level <- max(values[1], 0)
+    episode_years <- min(max(values[2], 1), longest_episode)
+    cod_mismatch_with_survey(level, episode_years) +
+      (values[1] - level)^2 + 0.01 * (values[2] - episode_years)^2
+  }
+  starting_points <- list(c(0.6, 6), c(0.6, 14), c(1.5, 4))
+  fits <- lapply(starting_points, function(start)
+    optim(start, objective, control = list(maxit = 150, reltol = 1e-5)))
+  for (fit in fits) {
+    cat(sprintf("  cod episode fit: level %.3f per year for %.1f years | cod mismatch %.4f\n",
+                max(fit$par[1], 0), min(max(fit$par[2], 1), longest_episode), fit$value))
+  }
+  best <- fits[[which.min(sapply(fits, function(fit) fit$value))]]
+  cod_extra_mortality <<- max(best$par[1], 0)
+  cod_episode_years   <<- min(max(best$par[2], 1), longest_episode)
+}
+
+if (fit_seals) fit_seal_rates_to_counts()
+if (fit_cod_mortality) {
+  cat(sprintf("cod mismatch with the survey, 1970-%d, without extra mortality: %.4f\n",
+              last_fitted_year, cod_mismatch_with_survey(0, 0)))
+  fit_cod_mortality_to_survey()
+  cat(sprintf("extra mortality on mature cod: %.3f per year from %d, ending in %.1f\n",
+              cod_extra_mortality, cod_mortality_starts,
+              cod_mortality_starts + cod_episode_years))
+  cat("  the same, with the episode running to the end of 2010: cod mismatch ",
+      sprintf("%.4f\n", cod_mismatch_with_survey(cod_extra_mortality, longest_episode)))
+  # Fewer cod change the seals' food a little, so their rates are fitted once
+  # more with the cod episode in place.
+  if (fit_seals) fit_seal_rates_to_counts()
+  cat(sprintf("cod mismatch with the survey after the last seal fit: %.4f\n",
+              cod_mismatch_with_survey(cod_extra_mortality, cod_episode_years)))
+}
+simulations <- c(list(spin_up), run_from_1961(seal_erepro, seal_harvest_rate,
+                                              cod_extra_mortality, cod_episode_years))
 growing_params <- params_dynamic
 growing_params@species_params$erepro[is_seal] <- seal_erepro
 growing_params@species_params$R_max[is_seal]  <- demography[["R_max"]]
@@ -180,8 +289,11 @@ seal_mortality_on <- function(species, year, sizes) {
 
 saveRDS(list(biomass = biomass, catch = catch, seal_numbers = seal_numbers,
              eaten = eaten, demography = demography,
-             seal_erepro = seal_erepro, seal_harvest_rate = seal_harvest_rate),
-        file.path(work_folder, "dynamic_seal_run.rds"))
+             seal_erepro = seal_erepro, seal_harvest_rate = seal_harvest_rate,
+             cod_extra_mortality = cod_extra_mortality,
+             cod_mortality_starts = cod_mortality_starts,
+             cod_episode_years = cod_episode_years),
+        file.path(work_folder, Sys.getenv("RUN_FILE", "dynamic_seal_run.rds")))
 
 # ---- Report ------------------------------------------------------------------
 
@@ -226,6 +338,15 @@ for (period in list(1970:2004, 2005:2010)) {
               skill_line(biomass, observed_biomass, period)))
   cat(sprintf("  catch   %d-%d: %s\n", min(period), max(period),
               skill_line(catch, observed_catch, period)))
+}
+for (period in list(1990:1993, 1994:2004, 2005:2010)) {
+  cod_rows <- readRDS("Ess_Fishmip_data/biomass_ts.RDS") |> filter(Species == "Atlantic Cod")
+  cat(sprintf("cod in %d-%d relative to 1978-1981: model %.2f, observed %.2f\n",
+              min(period), max(period),
+              mean(biomass[as.character(period), "Atlantic Cod"]) /
+                mean(biomass[as.character(1978:1981), "Atlantic Cod"]),
+              mean(cod_rows$Biomass[cod_rows$Year %in% period]) /
+                mean(cod_rows$Biomass[cod_rows$Year %in% 1978:1981])))
 }
 cat("\nbiomass in 1994-2004 relative to 1978-1981: model (observed)\n")
 all_observed <- readRDS("Ess_Fishmip_data/biomass_ts.RDS")

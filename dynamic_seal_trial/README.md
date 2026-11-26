@@ -58,7 +58,13 @@ Rscript dynamic_seal_trial/plot_seal_on_bowen_diet.R
   year in the Bowen & Harrison proportions.
 - `9_project_seal_on_bowen_diet.R`: projects 1861-2010. With
   `FIT_SEALS_IN_FULL_MODEL=1` it first fits the seal's reproductive efficiency
-  and harvest rate to the counts inside the full model.
+  and harvest rate to the counts inside the full model. With
+  `FIT_COD_MORTALITY=1` it also fits an episode of extra natural mortality on
+  mature cod (its level and how many years it lasts from 1990) to the cod
+  survey for 1970-2004. `SEAL_EREPRO` and `SEAL_HARVEST_RATE` give the seal
+  rates from an earlier fit, and `RUN_FILE` names the output file.
+- `plot_seal_on_bowen_diet.R`: draws the run in `RUN_FILE`. `EARLIER_RUN_FILE`
+  adds a second run in grey, and `FIGURE_TAG` is added to the figure names.
 - Scripts 1, 2 and 5 are the earlier ones, now reading their starting model
   from `BASE_PARAMS` and `SEAL_SOURCE`. They and scripts 8 and 9 still read
   Paper 2's seal parameters and the digitised seal counts from
