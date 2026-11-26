@@ -67,6 +67,10 @@ steady_preserve <- "erepro"
 # toward the observed biomass and then re-solves; a few passes is normal.
 match_biomass_passes <- 4
 
+# Reproduction level given to species that arrive from Stage 1 with no limit on
+# recruitment (R_max infinite). See "A recruitment limit for every species".
+reproduction_level_for_unlimited_species <- 0.25
+
 output_file <- "Ess_Fishmip_data/params_GFDL_steady.RDS"
 
 # ---- Inputs ------------------------------------------------------------------
@@ -370,6 +374,50 @@ if (inherits(params_with_yield, "try-error")) {
                 quality_before$score, quality_after$score,
                 quality_before$admissible, quality_after$admissible))
   }
+}
+
+# ---- A recruitment limit for every species -----------------------------------
+
+# Four species come from Stage 1 with R_max infinite: spiny dogfish, thorny
+# skate, winter skate and longhorn sculpin. With no limit, recruitment rises in
+# proportion to egg production however large the stock gets. In the fished
+# calibration state that does no harm, but as soon as mortality is lowered the
+# stock grows without bound: with fishing switched off, dogfish grew about
+# fivefold every 30 years and then removed the rest of the community.
+#
+# They are given a finite R_max here by setting their reproduction level, the
+# ratio of actual recruitment to the maximum possible. setBevertonHolt() does
+# this without moving the steady state: recruitment at the calibrated state is
+# unchanged, R_max becomes that recruitment divided by the level, and erepro is
+# raised by 1 / (1 - level) to compensate.
+#
+# The level is 0.25, so recruitment can rise to at most four times its
+# calibrated value. Why 0.25: dogfish already has erepro near 0.6, and erepro
+# cannot exceed 1 (a fish cannot recruit more young than it has eggs), so its
+# level cannot go above about 0.4. 0.25 leaves a margin and is used for all
+# four so that they are treated alike. It is a choice, not an estimate; the
+# other 15 species sit between 0.47 and 1.00.
+unlimited_species <- as.character(
+  params_calibrated@species_params$species[
+    !is.finite(params_calibrated@species_params$R_max)])
+if (length(unlimited_species)) {
+  erepro_before <- params_calibrated@species_params[unlimited_species, "erepro"]
+  biomass_before <- getBiomass(params_calibrated)
+  params_calibrated <- setBevertonHolt(
+    params_calibrated,
+    reproduction_level = setNames(
+      rep(reproduction_level_for_unlimited_species, length(unlimited_species)),
+      unlimited_species))
+  cat("\nrecruitment limit added (reproduction level ",
+      reproduction_level_for_unlimited_species, "):\n", sep = "")
+  print(data.frame(
+    row.names = unlimited_species,
+    erepro_before = signif(erepro_before, 3),
+    erepro_after = signif(params_calibrated@species_params[unlimited_species, "erepro"], 3),
+    R_max = signif(params_calibrated@species_params[unlimited_species, "R_max"], 3)))
+  # The steady state must not have moved.
+  stopifnot(all(is.finite(params_calibrated@species_params$R_max)),
+            max(abs(getBiomass(params_calibrated) / biomass_before - 1)) < 1e-8)
 }
 
 params_final <- params_calibrated
