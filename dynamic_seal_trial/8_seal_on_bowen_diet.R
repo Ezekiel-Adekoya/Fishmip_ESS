@@ -15,11 +15,12 @@
 #   - the other 15% of its food comes from outside the model.
 # The fish are re-matched to their observed biomass each time the seal changes.
 #
-# Bowen & Harrison sampled in 1991-1993, not in 1978-1981. The shares the seal
-# is calibrated to here can therefore be given from outside
-# (REFERENCE_DIET_FILE, written by script 10), chosen so that the diet comes
-# out in the measured proportions in 1991-1993 of the projection. Without that
-# file the measured proportions are used as they are.
+# The diets were measured in 1991-1993 and 1993-1998 (seal_diet_data.R), not
+# in 1978-1981. The shares the seal is calibrated to here can therefore be
+# given from outside (REFERENCE_DIET_FILE, written by script 10), chosen so
+# that the diet comes out close to the measured proportions in those years of
+# the projection. Without that file the average of the two measured diets is
+# used.
 #
 # Writes the calibrated model and the seal's feeding level to the SC folder.
 # Script 5 then fits the seal's growth and harvest at that feeding level, and
@@ -27,15 +28,14 @@
 
 suppressPackageStartupMessages({library(mizer); library(therMizer)})
 source("Ess_Fishmip_data/Useful_functions.R")
+source("dynamic_seal_trial/seal_diet_data.R")
 quietly <- function(expression) suppressWarnings(suppressMessages(expression))
 region_area_m2 <- 146360555008
 work_folder <- Sys.getenv("SC")
 
 fish_per_seal_tonnes <- 12 * 170 * 0.85 / 1000      # 1.73 t of fish per seal a year
 outside_food_per_fish <- 0.15 / 0.85                 # non-fish food, relative to fish
-bowen_share <- c("Sand Lance" = 0.809, "Atlantic Cod" = 0.110, "Silver Hake" = 0.026,
-                 "American Plaice" = 0.014, "Redfish Unseparated" = 0.013,
-                 "Yellowtail Flounder" = 0.011)
+bowen_share <- starting_seal_diet_share
 measured_share <- bowen_share
 reference_diet_file <- Sys.getenv("REFERENCE_DIET_FILE")
 if (nzchar(reference_diet_file) && file.exists(file.path(work_folder, reference_diet_file))) {
@@ -145,10 +145,18 @@ for (pass in 1:40) {
               sum(getBiomass(params)[fish]) / region_area_m2,
               mean(getFeedingLevel(params)["Grey Seal", adult_seal_sizes])))
 }
+# Settle with the seals at their target number and the fish at theirs. The
+# seal's recruitment limit is scaled with its numbers, or the next settling
+# would undo the change.
+for (pass in 1:5) {
+  params <- solve_steady(params)
+  seal_scale <- seal_target_thousand / seals_in_thousands(params)
+  params@species_params$R_max[is_seal] <- params@species_params$R_max[is_seal] * seal_scale
+  params@initial_n["Grey Seal", ] <- params@initial_n["Grey Seal", ] * seal_scale
+  params <- quietly(matchBiomasses(params, species = fish))
+}
 params <- solve_steady(params)
-seal_scale <- seal_target_thousand / seals_in_thousands(params)
-params@initial_n["Grey Seal", ] <- params@initial_n["Grey Seal", ] * seal_scale
-params <- solve_steady(quietly(matchBiomasses(params, species = fish)))
+stopifnot(abs(seals_in_thousands(params) / seal_target_thousand - 1) < 0.05)
 
 # ---- Put each fish back at its own reproduction level --------------------------
 
@@ -230,5 +238,5 @@ cat(sprintf("seal predation mortality on sand lance: %.3f per year (biomass weig
                   sand_lance_biomass) / sum(sand_lance_biomass)))
 
 saveRDS(list(params = params, seal_feeding_level = seal_feeding_level,
-             target_share = target_share, bowen_share = measured_share),
+             target_share = target_share, calibrated_share = bowen_share),
         file.path(work_folder, "seal_on_bowen_diet.rds"))

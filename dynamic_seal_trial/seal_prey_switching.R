@@ -44,12 +44,17 @@ seal_preference_now <- function(params, n) {
 
 # Stores what the switching needs in the model and tells mizer to use the two
 # functions below. `reference_n` is the abundance at which the multiplier is 1.
+# `no_switching_for` names prey the seal does not switch on: its preference
+# for them stays fixed.
 add_seal_prey_switching <- function(params, reference_n = params@initial_n,
                                     exponent = smout_switching_exponent,
+                                    no_switching_for = character(0),
                                     typical_seal_weight = 170000) {
   species <- as.character(params@species_params$species)
   seal_row <- which(species == "Grey Seal")
   prey_rows <- which(species != "Grey Seal")
+  stopifnot(all(no_switching_for %in% species))
+  exponent_by_prey <- ifelse(species[prey_rows] %in% no_switching_for, 1, exponent)
   # How strongly a seal of typical weight selects each prey size, times the
   # weight and width of each size class: abundance times this is the biomass
   # in the sizes seals eat.
@@ -58,7 +63,7 @@ add_seal_prey_switching <- function(params, reference_n = params@initial_n,
   size_selection <- getPredKernel(params)[seal_row, seal_size_bin, fish_size_bins]
   weight_by_size <- size_selection * params@w * params@dw
   params@other_params$other$seal_prey_switching <- list(
-    seal_row = seal_row, prey_rows = prey_rows, exponent = exponent,
+    seal_row = seal_row, prey_rows = prey_rows, exponent = exponent_by_prey,
     weight_by_size = weight_by_size,
     reference_availability = as.vector(reference_n[prey_rows, , drop = FALSE] %*% weight_by_size))
   # Registered as a mizer extension, so that mizer keeps the class when it

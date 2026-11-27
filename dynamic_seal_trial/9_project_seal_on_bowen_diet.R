@@ -18,9 +18,11 @@
 # scarce and rises as it becomes common. It has no effect in the calibrated
 # state.
 #
-# Bowen & Harrison's samples were collected from July 1991 to January 1993, so
-# the script reports the seal's diet in 1991-1993 against theirs. Script 10
-# uses that to adjust the calibration until the two agree.
+# The seal's diet was measured in 1991-1993 and in 1993-1998
+# (seal_diet_data.R), so the script reports the model's diet in those years
+# against the measurements. Script 10 uses that to adjust the calibration.
+# NO_SWITCHING_FOR names prey (separated by commas) the seal does not switch
+# on, for example NO_SWITCHING_FOR="Atlantic Cod".
 #
 # SEAL_RATES_FROM names an earlier run file to take the seal's three fitted
 # values from, instead of fitting them again.
@@ -33,12 +35,13 @@ suppressPackageStartupMessages({
 })
 source("Ess_Fishmip_data/Useful_functions.R")
 source("dynamic_seal_trial/seal_prey_switching.R")
+source("dynamic_seal_trial/seal_diet_data.R")
 quietly <- function(expression) suppressWarnings(suppressMessages(expression))
 region_area_m2 <- 146360555008
 work_folder <- Sys.getenv("SC")
 multiplied_forage_species <- c("Atlantic Herring", "Sand Lance", "Capelin")
 harvest_years <- 1967:1990
-bowen_sampling_years <- 1991:1993
+prey_without_switching <- trimws(strsplit(Sys.getenv("NO_SWITCHING_FOR", ""), ",")[[1]])
 prey_switching_on <- Sys.getenv("PREY_SWITCHING", "1") != "0"
 
 first_build <- readRDS(file.path(work_folder, "seal_calibrated.rds"))   # forcing arrays
@@ -76,7 +79,8 @@ if (prey_switching_on) {
   # SWITCHING_EXPONENT tries a value other than Smout et al.'s 1.5.
   params_dynamic <- add_seal_prey_switching(
     params_dynamic, reference_n = params@initial_n,
-    exponent = as.numeric(Sys.getenv("SWITCHING_EXPONENT", smout_switching_exponent)))
+    exponent = as.numeric(Sys.getenv("SWITCHING_EXPONENT", smout_switching_exponent)),
+    no_switching_for = prey_without_switching)
 }
 # The seal's preference for each species given the abundances at one moment.
 seal_preference_given <- function(abundance) {
@@ -242,16 +246,18 @@ seal_mortality_on <- function(species, year, sizes) {
   weights <- state$n[species, sizes] * params@w[sizes] * params@dw[sizes]
   sum(seal_preference_given(state$n)[species] * pred_rate[sizes] * weights) / sum(weights)
 }
-# The seal's diet in the years Bowen & Harrison sampled.
-eaten_in_sampling_years <- colSums(eaten[as.character(bowen_sampling_years), ])
-diet_in_sampling_years <- eaten_in_sampling_years / sum(eaten_in_sampling_years)
+# The seal's diet in each period the diet was measured in.
+model_diet_share <- t(sapply(seal_diet_years, function(period_years) {
+  eaten_in_period <- colSums(eaten[as.character(period_years), ])
+  eaten_in_period / sum(eaten_in_period)
+}))
 
 saveRDS(list(biomass = biomass, catch = catch, seal_numbers = seal_numbers,
              eaten = eaten, demography = demography,
              seal_erepro = seal_erepro, seal_harvest_rate = seal_harvest_rate,
              seal_pup_limit = seal_pup_limit, prey_switching_on = prey_switching_on,
-             diet_in_sampling_years = diet_in_sampling_years,
-             bowen_share = calibrated$bowen_share),
+             prey_without_switching = prey_without_switching,
+             model_diet_share = model_diet_share, measured_diet_share = seal_diet_share),
         file.path(work_folder, "dynamic_seal_run.rds"))
 
 # ---- Report ------------------------------------------------------------------
@@ -272,16 +278,19 @@ for (year in c(1961, 1970, 1980, 1990, 1995, 2000, 2005, 2010)) {
               sum(biomass[y, fitted_species]) / region_area_m2))
 }
 
-cat(sprintf("\nprey switching: %s\nseal diet in %d-%d, model (Bowen & Harrison):\n",
-            if (prey_switching_on) "on" else "off",
-            min(bowen_sampling_years), max(bowen_sampling_years)))
-for (species in names(calibrated$bowen_share)) {
-  cat(sprintf("  %-20s %5.1f%%  (%.1f%%)\n", species, 100 * diet_in_sampling_years[species],
-              100 * calibrated$bowen_share[species]))
+cat(sprintf("\nprey switching: %s%s\n", if (prey_switching_on) "on" else "off",
+            if (prey_switching_on && length(prey_without_switching) > 0)
+              paste0(", but not for ", paste(prey_without_switching, collapse = ", ")) else ""))
+cat("seal diet, percent of fish eaten: model (measured)\n")
+cat(sprintf("  %-20s %-16s %-16s\n", "", rownames(seal_diet_share)[1], rownames(seal_diet_share)[2]))
+for (species in colnames(seal_diet_share)) {
+  cat(sprintf("  %-20s %5.1f (%4.1f)     %5.1f (%4.1f)\n", species,
+              100 * model_diet_share[1, species], 100 * seal_diet_share[1, species],
+              100 * model_diet_share[2, species], 100 * seal_diet_share[2, species]))
 }
-cat(sprintf("  %-20s %5.1f%%  (%.1f%%)\n", "other species together",
-            100 * (1 - sum(diet_in_sampling_years[names(calibrated$bowen_share)])),
-            100 * (1 - sum(calibrated$bowen_share))))
+cat(sprintf("  mean absolute gap over the named species: %.1f and %.1f percent of the diet\n",
+            100 * mean(abs(model_diet_share[1, colnames(seal_diet_share)] - seal_diet_share[1, ]), na.rm = TRUE),
+            100 * mean(abs(model_diet_share[2, colnames(seal_diet_share)] - seal_diet_share[2, ]), na.rm = TRUE)))
 cat("seal preference for cod, relative to the calibrated state:",
     paste(sprintf("%d %.2f", c(1980, 1990, 2000, 2010),
                   sapply(c(1980, 1990, 2000, 2010), function(year)

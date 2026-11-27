@@ -33,43 +33,54 @@ bite anyone adding a species to a therMizer model.
   prey weights, consumption target from the Bowen & Harrison diet shares, seal
   numbers from the fitted demography. Needs the outputs of 2 and 5.
 
-## Seal on the Bowen & Harrison diet, on a raised sand lance stock (handover section 27)
+## Seal on the measured diets, on raised sand lance and herring stocks (handover sections 27-32)
 
 Run in this order from the repository root. `SC` is any writable scratch
 folder; the other variables are read by the scripts named.
 
 ```
 export SC=/some/scratch/folder
-export SAND_LANCE_TARGET_KT=1500 SAND_LANCE_REPRODUCTION_LEVEL=0.9
-export BASE_PARAMS="$SC/base_params_raised_sand_lance.RDS"
+export SAND_LANCE_TARGET_KT=1500
+export BASE_PARAMS="$SC/base_params_raised_forage_fish.RDS"
 export SEAL_SOURCE=seal_on_bowen_diet.rds
-Rscript dynamic_seal_trial/7_fish_base_with_raised_sand_lance.R
+Rscript dynamic_seal_trial/7_fish_base_with_raised_forage_fish.R
 Rscript dynamic_seal_trial/1_build_structure.R
 Rscript dynamic_seal_trial/2_calibrate_with_seals.R
-Rscript dynamic_seal_trial/8_seal_on_bowen_diet.R
-Rscript dynamic_seal_trial/5_fit_seal_growth_and_harvest.R
-SEAL_RATES_FROM=some_earlier_run.rds Rscript dynamic_seal_trial/10_match_bowen_diet_in_1991_93.R
+DIET_ROUNDS=4 Rscript dynamic_seal_trial/10_match_seal_diet_to_both_periods.R
 FIT_SEALS_IN_FULL_MODEL=1 Rscript dynamic_seal_trial/9_project_seal_on_bowen_diet.R
 Rscript dynamic_seal_trial/plot_seal_on_bowen_diet.R
 ```
 
-- `7_fish_base_with_raised_sand_lance.R`: raises the sand lance target in
-  steps, recalibrating the fish each time, and sets its reproduction level.
+- `7_fish_base_with_raised_forage_fish.R`: raises the sand lance and herring
+  targets in steps, recalibrating the fish each time, keeps the herring catch
+  at the observed one, sets their reproduction levels (0.9), and checks that
+  the base stays put when left alone for 100 years. `HERRING_TARGET_KT`
+  (default 700; 0 leaves herring alone), `SAND_LANCE_REPRODUCTION_LEVEL` and
+  `HERRING_REPRODUCTION_LEVEL` change the settings.
+- `seal_diet_data.R`: the two measured diets (Bowen & Harrison 1994 for
+  1991-1993, and 2007 for 1993-1998) and the seven prey the seal is calibrated
+  on one by one.
 - `8_seal_on_bowen_diet.R`: calibrates the seal to 1.73 t of fish per seal a
-  year in the Bowen & Harrison proportions.
-- `9_project_seal_on_bowen_diet.R`: projects 1861-2010. With
-  `FIT_SEALS_IN_FULL_MODEL=1` it first fits the seal's reproductive efficiency
-  and harvest rate, and the limit on pups recruited a year, to the counts
-  inside the full model.
+  year in the proportions it is given (the average of the two measured diets,
+  or the shares script 10 has written).
+- `9_project_seal_on_bowen_diet.R`: projects 1861-2010 and reports the diet in
+  both measured periods. With `FIT_SEALS_IN_FULL_MODEL=1` it first fits the
+  seal's reproductive efficiency and harvest rate, and the limit on pups
+  recruited a year, to the counts inside the full model. `SEAL_RATES_FROM`
+  takes those three from an earlier run file instead.
 - `seal_prey_switching.R`: prey switching for the seal, after Smout et al.
   (2014, ICES J. Mar. Sci. 71: 81-89). The seal's preference for a prey is
   multiplied by (availability now / availability in the calibrated state)^0.5,
   their exponent of 1.5 less 1. Sourced by script 9; `PREY_SWITCHING=0` turns
-  it off.
-- `10_match_bowen_diet_in_1991_93.R`: repeats scripts 8, 5 and 9, adjusting
-  the diet script 8 calibrates to, until the projected diet in 1991-1993 (the
-  years Bowen & Harrison sampled) matches theirs. Leave `SEAL_RATES_FROM`
-  unset on a first run; the seal rates from script 5 are then used.
+  it off, `NO_SWITCHING_FOR="Atlantic Cod"` turns it off for named prey, and
+  `SWITCHING_EXPONENT` tries another exponent.
+- `10_match_seal_diet_to_both_periods.R`: repeats scripts 8, 5 and 9, moving
+  the diet script 8 calibrates to in small bounded steps so the projected diet
+  comes closer to the measured one in both periods, and finishes on the best
+  round. It runs scripts 8 and 5 itself.
+- A check on any of these models must load therMizer as well as mizer.
+  Without it the temperature effect is silently left out and a steady model
+  looks as if it drifts.
 - Scripts 1, 2 and 5 are the earlier ones, now reading their starting model
   from `BASE_PARAMS` and `SEAL_SOURCE`. They and scripts 8 and 9 still read
   Paper 2's seal parameters and the digitised seal counts from
