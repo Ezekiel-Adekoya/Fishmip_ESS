@@ -76,11 +76,14 @@ stopifnot(!anyNA(scaled_temp_effect(params_dynamic, 1861)),
 # The seal's preference shifts with prey availability, measured against the
 # calibrated state, where the shift is nil.
 if (prey_switching_on) {
-  # SWITCHING_EXPONENT tries a value other than Smout et al.'s 1.5.
+  # SWITCHING_EXPONENT tries a value other than Smout et al.'s 1.5 (0 is fixed
+  # shares; see seal_prey_switching.R), and SWITCHING_LARGEST_MULTIPLIER caps
+  # how far a preference can rise above its calibrated value.
   params_dynamic <- add_seal_prey_switching(
     params_dynamic, reference_n = params@initial_n,
     exponent = as.numeric(Sys.getenv("SWITCHING_EXPONENT", smout_switching_exponent)),
-    no_switching_for = prey_without_switching)
+    no_switching_for = prey_without_switching,
+    largest_multiplier = as.numeric(Sys.getenv("SWITCHING_LARGEST_MULTIPLIER", "Inf")))
 }
 # The seal's preference for each species given the abundances at one moment.
 seal_preference_given <- function(abundance) {
@@ -257,6 +260,7 @@ saveRDS(list(biomass = biomass, catch = catch, seal_numbers = seal_numbers,
              seal_erepro = seal_erepro, seal_harvest_rate = seal_harvest_rate,
              seal_pup_limit = seal_pup_limit, prey_switching_on = prey_switching_on,
              prey_without_switching = prey_without_switching,
+             switching_exponent = as.numeric(Sys.getenv("SWITCHING_EXPONENT", smout_switching_exponent)),
              model_diet_share = model_diet_share, measured_diet_share = seal_diet_share),
         file.path(work_folder, "dynamic_seal_run.rds"))
 

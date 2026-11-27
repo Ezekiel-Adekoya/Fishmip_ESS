@@ -18,6 +18,19 @@
 # disturbed. Availability is the biomass of the species weighted by the sizes
 # a typical adult seal eats. m is taken from Smout et al. and is not fitted.
 #
+# The exponent can be set to other values to try other responses:
+#   m = 1.5  Smout et al.: seals turn away from a prey as it becomes scarce.
+#   m = 1    plain mizer: seals take each prey in proportion to what is there.
+#   m = 0    fixed shares: each seal eats the same amount of a prey however
+#            much of it there is, so the diet keeps its proportions and the
+#            mortality seals cause on a prey RISES as the prey becomes scarce.
+#            The two Sable Island diets (1991-93 and 1993-98) look more like
+#            this for cod and flatfish, whose shares held or rose while their
+#            stocks fell. Two diet samples are thin support, so treat it as a
+#            hypothesis. Because the mortality grows without limit as a prey
+#            vanishes, `largest_multiplier` caps how far the preference can
+#            rise above its calibrated value.
+#
 # Use:  params <- add_seal_prey_switching(params)
 # The model is given the extra class "sealPreySwitching". mizer then calls the
 # two functions at the bottom of this file whenever it works out what
@@ -34,8 +47,9 @@ seal_preference_now <- function(params, n) {
   switching <- params@other_params$other$seal_prey_switching
   availability_now <- as.vector(n[switching$prey_rows, , drop = FALSE] %*%
                                   switching$weight_by_size)
-  preference_multiplier <-
-    (availability_now / switching$reference_availability)^(switching$exponent - 1)
+  preference_multiplier <- pmin(
+    (availability_now / switching$reference_availability)^(switching$exponent - 1),
+    switching$largest_multiplier)
   preference <- params@interaction
   preference[switching$seal_row, switching$prey_rows] <-
     preference[switching$seal_row, switching$prey_rows] * preference_multiplier
@@ -49,6 +63,7 @@ seal_preference_now <- function(params, n) {
 add_seal_prey_switching <- function(params, reference_n = params@initial_n,
                                     exponent = smout_switching_exponent,
                                     no_switching_for = character(0),
+                                    largest_multiplier = Inf,
                                     typical_seal_weight = 170000) {
   species <- as.character(params@species_params$species)
   seal_row <- which(species == "Grey Seal")
@@ -64,6 +79,7 @@ add_seal_prey_switching <- function(params, reference_n = params@initial_n,
   weight_by_size <- size_selection * params@w * params@dw
   params@other_params$other$seal_prey_switching <- list(
     seal_row = seal_row, prey_rows = prey_rows, exponent = exponent_by_prey,
+    largest_multiplier = largest_multiplier,
     weight_by_size = weight_by_size,
     reference_availability = as.vector(reference_n[prey_rows, , drop = FALSE] %*% weight_by_size))
   # Registered as a mizer extension, so that mizer keeps the class when it
