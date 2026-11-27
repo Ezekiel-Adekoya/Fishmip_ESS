@@ -76,6 +76,8 @@ Rscript dynamic_seal_trial/plot_seal_on_bowen_diet.R
   `SWITCHING_EXPONENT` tries another exponent. `SWITCHING_EXPONENT=0` makes
   seals eat fixed shares of each prey (handover section 34); use it with
   `SWITCHING_LARGEST_MULTIPLIER` (for example 3) and without script 10.
+  `PREY_HALF_SATURATION` (for example 0.2, with `SWITCHING_EXPONENT=3`) gives
+  a Type III response for each prey instead (handover section 35).
 - `10_match_seal_diet_to_both_periods.R`: repeats scripts 8, 5 and 9, moving
   the diet script 8 calibrates to in small bounded steps so the projected diet
   comes closer to the measured one in both periods, and finishes on the best

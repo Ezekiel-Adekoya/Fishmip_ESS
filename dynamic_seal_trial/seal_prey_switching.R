@@ -31,6 +31,21 @@
 #            vanishes, `largest_multiplier` caps how far the preference can
 #            rise above its calibrated value.
 #
+# A Type III response for each prey (`half_saturation` given):
+#   The seal's intake of a prey follows  N^m / (K^m + N^m), with N the prey's
+#   availability and K the availability at which intake is half its maximum.
+#   With m = 1.5 this has both halves of what the data seem to need. While a
+#   prey is well above K the intake is nearly flat, so seals take a rising
+#   fraction of a prey that is becoming scarce (the squeeze). Below about
+#   0.6 K the intake falls away faster than the prey does, so seals take a
+#   falling fraction of a prey that is nearly gone (the relief). The fraction
+#   taken is highest near 0.6 K: the "predator pit".
+#   `half_saturation` is K as a fraction of the prey's availability in the
+#   calibrated state, the same for every prey. It is not measured for these
+#   prey. In Smout et al.'s model the saturation is shared across all prey;
+#   saturation prey by prey is a departure from it, suggested by the Sable
+#   Island diets.
+#
 # Use:  params <- add_seal_prey_switching(params)
 # The model is given the extra class "sealPreySwitching". mizer then calls the
 # two functions at the bottom of this file whenever it works out what
@@ -47,9 +62,17 @@ seal_preference_now <- function(params, n) {
   switching <- params@other_params$other$seal_prey_switching
   availability_now <- as.vector(n[switching$prey_rows, , drop = FALSE] %*%
                                   switching$weight_by_size)
-  preference_multiplier <- pmin(
-    (availability_now / switching$reference_availability)^(switching$exponent - 1),
-    switching$largest_multiplier)
+  relative_availability <- availability_now / switching$reference_availability
+  if (is.null(switching$half_saturation)) {
+    preference_multiplier <- pmin(relative_availability^(switching$exponent - 1),
+                                  switching$largest_multiplier)
+  } else {
+    # Type III for each prey, scaled to be 1 in the calibrated state.
+    m <- switching$exponent
+    k <- switching$half_saturation
+    preference_multiplier <- relative_availability^(m - 1) * (1 + k^m) /
+      (relative_availability^m + k^m)
+  }
   preference <- params@interaction
   preference[switching$seal_row, switching$prey_rows] <-
     preference[switching$seal_row, switching$prey_rows] * preference_multiplier
@@ -64,6 +87,7 @@ add_seal_prey_switching <- function(params, reference_n = params@initial_n,
                                     exponent = smout_switching_exponent,
                                     no_switching_for = character(0),
                                     largest_multiplier = Inf,
+                                    half_saturation = NULL,
                                     typical_seal_weight = 170000) {
   species <- as.character(params@species_params$species)
   seal_row <- which(species == "Grey Seal")
@@ -79,7 +103,7 @@ add_seal_prey_switching <- function(params, reference_n = params@initial_n,
   weight_by_size <- size_selection * params@w * params@dw
   params@other_params$other$seal_prey_switching <- list(
     seal_row = seal_row, prey_rows = prey_rows, exponent = exponent_by_prey,
-    largest_multiplier = largest_multiplier,
+    largest_multiplier = largest_multiplier, half_saturation = half_saturation,
     weight_by_size = weight_by_size,
     reference_availability = as.vector(reference_n[prey_rows, , drop = FALSE] %*% weight_by_size))
   # Registered as a mizer extension, so that mizer keeps the class when it

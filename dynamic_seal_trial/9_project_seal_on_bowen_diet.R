@@ -79,11 +79,16 @@ if (prey_switching_on) {
   # SWITCHING_EXPONENT tries a value other than Smout et al.'s 1.5 (0 is fixed
   # shares; see seal_prey_switching.R), and SWITCHING_LARGEST_MULTIPLIER caps
   # how far a preference can rise above its calibrated value.
+  # PREY_HALF_SATURATION switches to a Type III response for each prey, with
+  # that half-saturation (a fraction of the calibrated availability).
   params_dynamic <- add_seal_prey_switching(
     params_dynamic, reference_n = params@initial_n,
     exponent = as.numeric(Sys.getenv("SWITCHING_EXPONENT", smout_switching_exponent)),
     no_switching_for = prey_without_switching,
-    largest_multiplier = as.numeric(Sys.getenv("SWITCHING_LARGEST_MULTIPLIER", "Inf")))
+    largest_multiplier = as.numeric(Sys.getenv("SWITCHING_LARGEST_MULTIPLIER", "Inf")),
+    half_saturation = if (nzchar(Sys.getenv("PREY_HALF_SATURATION"))) {
+      as.numeric(Sys.getenv("PREY_HALF_SATURATION"))
+    })
 }
 # The seal's preference for each species given the abundances at one moment.
 seal_preference_given <- function(abundance) {
