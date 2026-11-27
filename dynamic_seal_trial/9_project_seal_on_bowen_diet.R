@@ -73,7 +73,10 @@ stopifnot(!anyNA(scaled_temp_effect(params_dynamic, 1861)),
 # The seal's preference shifts with prey availability, measured against the
 # calibrated state, where the shift is nil.
 if (prey_switching_on) {
-  params_dynamic <- add_seal_prey_switching(params_dynamic, reference_n = params@initial_n)
+  # SWITCHING_EXPONENT tries a value other than Smout et al.'s 1.5.
+  params_dynamic <- add_seal_prey_switching(
+    params_dynamic, reference_n = params@initial_n,
+    exponent = as.numeric(Sys.getenv("SWITCHING_EXPONENT", smout_switching_exponent)))
 }
 # The seal's preference for each species given the abundances at one moment.
 seal_preference_given <- function(abundance) {
