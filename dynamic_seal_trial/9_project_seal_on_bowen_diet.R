@@ -13,6 +13,18 @@
 # mortality, no change in catchability after the moratorium. This run shows
 # what the seal does on its own account.
 #
+# Prey switching (seal_prey_switching.R, after Smout et al. 2014) is on unless
+# PREY_SWITCHING=0: the seal's preference for a prey falls as that prey becomes
+# scarce and rises as it becomes common. It has no effect in the calibrated
+# state.
+#
+# Bowen & Harrison's samples were collected from July 1991 to January 1993, so
+# the script reports the seal's diet in 1991-1993 against theirs. Script 10
+# uses that to adjust the calibration until the two agree.
+#
+# SEAL_RATES_FROM names an earlier run file to take the seal's three fitted
+# values from, instead of fitting them again.
+#
 # Writes dynamic_seal_run.rds to the SC folder and prints the comparison with
 # the seal counts, the Bowen & Harrison diet and the survey and catch series.
 
@@ -20,11 +32,14 @@ suppressPackageStartupMessages({
   library(mizer); library(therMizer); library(dplyr); library(tidyr)
 })
 source("Ess_Fishmip_data/Useful_functions.R")
+source("dynamic_seal_trial/seal_prey_switching.R")
 quietly <- function(expression) suppressWarnings(suppressMessages(expression))
 region_area_m2 <- 146360555008
 work_folder <- Sys.getenv("SC")
 multiplied_forage_species <- c("Atlantic Herring", "Sand Lance", "Capelin")
 harvest_years <- 1967:1990
+bowen_sampling_years <- 1991:1993
+prey_switching_on <- Sys.getenv("PREY_SWITCHING", "1") != "0"
 
 first_build <- readRDS(file.path(work_folder, "seal_calibrated.rds"))   # forcing arrays
 calibrated  <- readRDS(file.path(work_folder, "seal_on_bowen_diet.rds"))
@@ -54,6 +69,17 @@ params_dynamic <- quietly(upgradeTherParams(
   aerobic_effect = TRUE, metabolism_effect = TRUE))
 stopifnot(!anyNA(scaled_temp_effect(params_dynamic, 1861)),
           isTRUE(all.equal(params_dynamic@search_vol, params@search_vol)))
+
+# The seal's preference shifts with prey availability, measured against the
+# calibrated state, where the shift is nil.
+if (prey_switching_on) {
+  params_dynamic <- add_seal_prey_switching(params_dynamic, reference_n = params@initial_n)
+}
+# The seal's preference for each species given the abundances at one moment.
+seal_preference_given <- function(abundance) {
+  if (prey_switching_on) seal_preference_now(params_dynamic, abundance)["Grey Seal", ]
+  else params@interaction["Grey Seal", ]
+}
 
 # ---- Spin-up with few seals --------------------------------------------------
 
@@ -127,6 +153,12 @@ seal_erepro <- demography[["erepro"]]
 seal_harvest_rate <- demography[["harvest_rate"]]
 seal_pup_limit <- demography[["R_max"]]
 seal_fit_scale <- Sys.getenv("SEAL_FIT_SCALE", "natural")
+if (nzchar(Sys.getenv("SEAL_RATES_FROM"))) {
+  earlier_run <- readRDS(file.path(work_folder, Sys.getenv("SEAL_RATES_FROM")))
+  seal_erepro <- earlier_run$seal_erepro
+  seal_harvest_rate <- earlier_run$seal_harvest_rate
+  seal_pup_limit <- earlier_run$seal_pup_limit
+}
 if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
   count_years <- as.character(1961:2010)
   mismatch_with_counts <- function(values) {
@@ -196,21 +228,27 @@ seal_pred_rate_in <- function(year) {
 }
 eaten <- t(sapply(years, function(year) {
   state <- state_in(year); pred_rate <- seal_pred_rate_in(year)
+  preference <- seal_preference_given(state$n)
   sapply(fish, function(species)
-    sum(params@interaction["Grey Seal", species] * pred_rate *
+    sum(preference[species] * pred_rate *
           state$n[species, ] * params@w * params@dw)) / 1e9
 }))
 rownames(eaten) <- years
 seal_mortality_on <- function(species, year, sizes) {
   state <- state_in(year); pred_rate <- seal_pred_rate_in(year)
   weights <- state$n[species, sizes] * params@w[sizes] * params@dw[sizes]
-  sum(params@interaction["Grey Seal", species] * pred_rate[sizes] * weights) / sum(weights)
+  sum(seal_preference_given(state$n)[species] * pred_rate[sizes] * weights) / sum(weights)
 }
+# The seal's diet in the years Bowen & Harrison sampled.
+eaten_in_sampling_years <- colSums(eaten[as.character(bowen_sampling_years), ])
+diet_in_sampling_years <- eaten_in_sampling_years / sum(eaten_in_sampling_years)
 
 saveRDS(list(biomass = biomass, catch = catch, seal_numbers = seal_numbers,
              eaten = eaten, demography = demography,
              seal_erepro = seal_erepro, seal_harvest_rate = seal_harvest_rate,
-             seal_pup_limit = seal_pup_limit),
+             seal_pup_limit = seal_pup_limit, prey_switching_on = prey_switching_on,
+             diet_in_sampling_years = diet_in_sampling_years,
+             bowen_share = calibrated$bowen_share),
         file.path(work_folder, "dynamic_seal_run.rds"))
 
 # ---- Report ------------------------------------------------------------------
@@ -230,6 +268,22 @@ for (year in c(1961, 1970, 1980, 1990, 1995, 2000, 2005, 2010)) {
               seal_mortality_on("Atlantic Cod", year, cod_juvenile_sizes),
               sum(biomass[y, fitted_species]) / region_area_m2))
 }
+
+cat(sprintf("\nprey switching: %s\nseal diet in %d-%d, model (Bowen & Harrison):\n",
+            if (prey_switching_on) "on" else "off",
+            min(bowen_sampling_years), max(bowen_sampling_years)))
+for (species in names(calibrated$bowen_share)) {
+  cat(sprintf("  %-20s %5.1f%%  (%.1f%%)\n", species, 100 * diet_in_sampling_years[species],
+              100 * calibrated$bowen_share[species]))
+}
+cat(sprintf("  %-20s %5.1f%%  (%.1f%%)\n", "other species together",
+            100 * (1 - sum(diet_in_sampling_years[names(calibrated$bowen_share)])),
+            100 * (1 - sum(calibrated$bowen_share))))
+cat("seal preference for cod, relative to the calibrated state:",
+    paste(sprintf("%d %.2f", c(1980, 1990, 2000, 2010),
+                  sapply(c(1980, 1990, 2000, 2010), function(year)
+                    seal_preference_given(state_in(year)$n)["Atlantic Cod"] /
+                      params@interaction["Grey Seal", "Atlantic Cod"])), collapse = " | "), "\n")
 
 observed_biomass <- readRDS("Ess_Fishmip_data/biomass_ts.RDS") |>
   transmute(Year = as.integer(Year), Species = as.character(Species), observed = Biomass) |>

@@ -48,6 +48,7 @@ Rscript dynamic_seal_trial/1_build_structure.R
 Rscript dynamic_seal_trial/2_calibrate_with_seals.R
 Rscript dynamic_seal_trial/8_seal_on_bowen_diet.R
 Rscript dynamic_seal_trial/5_fit_seal_growth_and_harvest.R
+SEAL_RATES_FROM=some_earlier_run.rds Rscript dynamic_seal_trial/10_match_bowen_diet_in_1991_93.R
 FIT_SEALS_IN_FULL_MODEL=1 Rscript dynamic_seal_trial/9_project_seal_on_bowen_diet.R
 Rscript dynamic_seal_trial/plot_seal_on_bowen_diet.R
 ```
@@ -60,6 +61,15 @@ Rscript dynamic_seal_trial/plot_seal_on_bowen_diet.R
   `FIT_SEALS_IN_FULL_MODEL=1` it first fits the seal's reproductive efficiency
   and harvest rate, and the limit on pups recruited a year, to the counts
   inside the full model.
+- `seal_prey_switching.R`: prey switching for the seal, after Smout et al.
+  (2014, ICES J. Mar. Sci. 71: 81-89). The seal's preference for a prey is
+  multiplied by (availability now / availability in the calibrated state)^0.5,
+  their exponent of 1.5 less 1. Sourced by script 9; `PREY_SWITCHING=0` turns
+  it off.
+- `10_match_bowen_diet_in_1991_93.R`: repeats scripts 8, 5 and 9, adjusting
+  the diet script 8 calibrates to, until the projected diet in 1991-1993 (the
+  years Bowen & Harrison sampled) matches theirs. Leave `SEAL_RATES_FROM`
+  unset on a first run; the seal rates from script 5 are then used.
 - Scripts 1, 2 and 5 are the earlier ones, now reading their starting model
   from `BASE_PARAMS` and `SEAL_SOURCE`. They and scripts 8 and 9 still read
   Paper 2's seal parameters and the digitised seal counts from

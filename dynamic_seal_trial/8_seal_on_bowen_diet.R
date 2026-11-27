@@ -15,6 +15,12 @@
 #   - the other 15% of its food comes from outside the model.
 # The fish are re-matched to their observed biomass each time the seal changes.
 #
+# Bowen & Harrison sampled in 1991-1993, not in 1978-1981. The shares the seal
+# is calibrated to here can therefore be given from outside
+# (REFERENCE_DIET_FILE, written by script 10), chosen so that the diet comes
+# out in the measured proportions in 1991-1993 of the projection. Without that
+# file the measured proportions are used as they are.
+#
 # Writes the calibrated model and the seal's feeding level to the SC folder.
 # Script 5 then fits the seal's growth and harvest at that feeding level, and
 # script 9 projects.
@@ -30,6 +36,15 @@ outside_food_per_fish <- 0.15 / 0.85                 # non-fish food, relative t
 bowen_share <- c("Sand Lance" = 0.809, "Atlantic Cod" = 0.110, "Silver Hake" = 0.026,
                  "American Plaice" = 0.014, "Redfish Unseparated" = 0.013,
                  "Yellowtail Flounder" = 0.011)
+measured_share <- bowen_share
+reference_diet_file <- Sys.getenv("REFERENCE_DIET_FILE")
+if (nzchar(reference_diet_file) && file.exists(file.path(work_folder, reference_diet_file))) {
+  reference_diet <- readRDS(file.path(work_folder, reference_diet_file))
+  bowen_share <- reference_diet[names(measured_share)]
+  cat("calibrating to the shares in", reference_diet_file, ":\n")
+  print(round(100 * bowen_share, 2))
+}
+# From here on bowen_share is the diet to reach in the calibrated state.
 # Preferred prey about 20 g with a wide spread: fitted in handover section 21
 # to the mean prey weights Bowen & Harrison measured.
 seal_weight_over_prey_weight <- 225000 / 20
@@ -185,7 +200,7 @@ cat(sprintf("\ncalibrated with %.1f thousand seals: fish %.2f g/m2 | biomass wit
 cat(sprintf("seals eat %.1f kt of fish a year, %.2f t per seal (target %.2f); feeding level %.2f\n",
             sum(eaten), sum(eaten) / seals_in_thousands(params), fish_per_seal_tonnes,
             seal_feeding_level))
-cat("share of the fish eaten, model against Bowen & Harrison:\n")
+cat("share of the fish eaten, model against the shares calibrated to:\n")
 for (species in names(bowen_share)) {
   cat(sprintf("  %-20s %5.1f%%  (%.1f%%)   preference %.3f\n", species,
               100 * eaten[species] / sum(eaten), 100 * bowen_share[species],
@@ -215,5 +230,5 @@ cat(sprintf("seal predation mortality on sand lance: %.3f per year (biomass weig
                   sand_lance_biomass) / sum(sand_lance_biomass)))
 
 saveRDS(list(params = params, seal_feeding_level = seal_feeding_level,
-             target_share = target_share),
+             target_share = target_share, bowen_share = measured_share),
         file.path(work_folder, "seal_on_bowen_diet.rds"))
