@@ -96,35 +96,56 @@ seal_preference_given <- function(abundance) {
   else params@interaction["Grey Seal", ]
 }
 
+# The same model with another feeding response for the seal: the exponent and
+# the half-saturation of the Type III response for each prey
+# (seal_prey_switching.R). Prey named in NO_SWITCHING_FOR keep exponent 1.
+with_feeding_response <- function(model, exponent, half_saturation) {
+  switching <- model@other_params$other$seal_prey_switching
+  switching$exponent <- ifelse(fish %in% prey_without_switching, 1, exponent)
+  switching$half_saturation <- half_saturation
+  model@other_params$other$seal_prey_switching <- switching
+  model
+}
+
 # ---- Spin-up with few seals --------------------------------------------------
 
+# Runs a model from 1861 to 1961 with seals held near their 1960 number, and
+# returns the simulation and the state in 1961 with seals set to the 1961
+# count. The spin-up depends on the seal's feeding response, so it is run
+# again for every feeding response tried.
 calibration_seals <- seals_in_thousands(params@initial_n)
-spin_up_params <- params_dynamic
-spin_up_params@species_params$R_max[is_seal] <-
-  params@species_params$R_max[is_seal] * seal_counts[["1960"]] / calibration_seals
-spin_up_params@initial_n["Grey Seal", ] <-
-  params@initial_n["Grey Seal", ] * seal_counts[["1960"]] / calibration_seals
-spin_up <- quietly(project(spin_up_params,
-                           effort = effort_by_year[as.character(1861:1961), ],
-                           progress_bar = FALSE))
-abundance_in_1961 <- spin_up@n[dim(spin_up@n)[1], , ]
-resource_in_1961  <- spin_up@n_pp[dim(spin_up@n_pp)[1], ]
-abundance_in_1961["Grey Seal", ] <- abundance_in_1961["Grey Seal", ] *
-  seal_counts[["1961"]] / seals_in_thousands(abundance_in_1961)
+spin_up_to_1961 <- function(model) {
+  spin_up_params <- model
+  spin_up_params@species_params$R_max[is_seal] <-
+    params@species_params$R_max[is_seal] * seal_counts[["1960"]] / calibration_seals
+  spin_up_params@initial_n["Grey Seal", ] <-
+    params@initial_n["Grey Seal", ] * seal_counts[["1960"]] / calibration_seals
+  simulation <- quietly(project(spin_up_params,
+                                effort = effort_by_year[as.character(1861:1961), ],
+                                progress_bar = FALSE))
+  abundance <- simulation@n[dim(simulation@n)[1], , ]
+  abundance["Grey Seal", ] <- abundance["Grey Seal", ] *
+    seal_counts[["1961"]] / seals_in_thousands(abundance)
+  list(simulation = simulation, abundance = abundance,
+       resource = simulation@n_pp[dim(simulation@n_pp)[1], ])
+}
+state_in_1961 <- spin_up_to_1961(params_dynamic)
 
 # ---- 1961-2010 with seal growth and harvest ----------------------------------
 
-# One run from the 1961 state for a given seal reproductive efficiency and
-# harvest rate. Returns the three stretches of simulation.
-run_from_1961 <- function(seal_erepro, seal_harvest_rate, seal_pup_limit) {
-  growing_params <- params_dynamic
+# One run from the 1961 state for a given seal reproductive efficiency,
+# harvest rate and R_max (the limit on pups recruited a year). Returns the
+# three stretches of simulation.
+run_from_1961 <- function(seal_erepro, seal_harvest_rate, seal_pup_limit,
+                          model = params_dynamic, start = state_in_1961) {
+  growing_params <- model
   growing_params@species_params$erepro[is_seal] <- seal_erepro
   growing_params@species_params$R_max[is_seal]  <- seal_pup_limit
   stretches <- list(list(from = 1961, to = 1967, harvest = 0),
                     list(from = 1967, to = 1991, harvest = seal_harvest_rate),
                     list(from = 1991, to = 2010, harvest = 0))
-  abundance <- abundance_in_1961
-  resource  <- resource_in_1961
+  abundance <- start$abundance
+  resource  <- start$resource
   stretch_simulations <- list()
   for (stretch in stretches) {
     stretch_params <- growing_params
@@ -140,6 +161,15 @@ run_from_1961 <- function(seal_erepro, seal_harvest_rate, seal_pup_limit) {
   }
   stretch_simulations
 }
+# kt of each fish species the seals eat in a year, given the state that year.
+fish_eaten_by_seals <- function(model, abundance, resource, year) {
+  pred_rate <- quietly(getPredRate(model, n = abundance, n_pp = resource, t = year))[
+    "Grey Seal", fish_size_bins]
+  preference <- if (prey_switching_on) seal_preference_now(model, abundance)["Grey Seal", ]
+                else params@interaction["Grey Seal", ]
+  sapply(fish, function(species)
+    sum(preference[species] * pred_rate * abundance[species, ] * params@w * params@dw)) / 1e9
+}
 seal_numbers_in <- function(stretch_simulations) {
   numbers <- unlist(lapply(stretch_simulations, function(simulation) {
     n <- getN(simulation)[, "Grey Seal"] / 1000
@@ -147,6 +177,28 @@ seal_numbers_in <- function(stretch_simulations) {
   }))
   last <- stretch_simulations[[length(stretch_simulations)]]
   c(numbers, tail(getN(last)[, "Grey Seal"] / 1000, 1))
+}
+
+# Pups born to each mature female seal in a year. A grey seal female bears at
+# most one pup a year, and at Sable Island a female that has pupped has about
+# an 85% chance of pupping the next year (den Heyer & Bowen 2017, DFO Res.
+# Doc. 2017/054), so the model's figure must stay below 1. Mature females are
+# taken as half the mature seals. "Births" are the pups produced before the
+# seal's R_max acts on them (mizer's density-independent reproduction).
+seal_maturity <- maturity(params)["Grey Seal", ]
+seal_births_in <- function(model, abundance, resource, year) {
+  mature_females <- sum(abundance["Grey Seal", ] * seal_maturity * params@dw) / 2
+  births <- quietly(getRDI(model, n = abundance, n_pp = resource, t = year))[["Grey Seal"]]
+  c(mature_females = mature_females, births = births)
+}
+# The same at the end of each stretch of a run (1967, 1991 and 2010).
+births_per_female_in <- function(stretch_simulations) {
+  sapply(stretch_simulations, function(simulation) {
+    last <- dim(simulation@n)[1]
+    pups <- seal_births_in(simulation@params, simulation@n[last, , ], simulation@n_pp[last, ],
+                           as.numeric(dimnames(simulation@n)[[1]][last]))
+    pups[["births"]] / pups[["mature_females"]]
+  })
 }
 
 # The growth and harvest rates from script 5 were fitted with the seal on its
@@ -174,13 +226,101 @@ if (nzchar(Sys.getenv("SEAL_RATES_FROM"))) {
   seal_harvest_rate <- earlier_run$seal_harvest_rate
   seal_pup_limit <- earlier_run$seal_pup_limit
 }
+
+# ---- Fit the seal's feeding response -----------------------------------------
+#
+# With FIT_FEEDING_RESPONSE=1 the exponent and the half-saturation of the
+# Type III response are fitted, the same two values for every prey, to
+#   - the cod survey, 1970-2004 (2005-2010 is held out), and
+#   - the seal's measured diet in 1991-1993 and in 1993-1998.
+# The seal's growth, harvest and R_max are held at the values above while
+# this is done.
+#
+# The two mismatches are in different units, so each is divided by what it is
+# in the plain model (no switching) and the two are averaged. A value of 0.4
+# then reads "40% of the plain model's mismatch is left".
+#   cod:  mean squared difference of log10 biomass, model against survey.
+#   diet: mean squared difference of the square roots of the diet shares,
+#         over the calibrated prey in both periods. Square roots stop sand
+#         lance (60-80% of the diet) swamping the other prey, without giving
+#         a prey at 1% the same weight as cod.
+cod_survey <- readRDS("Ess_Fishmip_data/biomass_ts.RDS") |>
+  filter(Species == "Atlantic Cod", Year %in% 1970:2004, Biomass > 0)
+cod_and_diet_mismatch <- function(model) {
+  stretch_simulations <- run_from_1961(seal_erepro, seal_harvest_rate, seal_pup_limit,
+                                       model = model, start = spin_up_to_1961(model))
+  cod_by_year <- unlist(lapply(stretch_simulations, function(simulation)
+    getBiomass(simulation)[, "Atlantic Cod"]))
+  cod_by_year <- cod_by_year[!duplicated(names(cod_by_year))]
+  cod_mismatch <- mean((log10(cod_by_year[as.character(cod_survey$Year)]) -
+                          log10(cod_survey$Biomass))^2)
+  last_stretch <- stretch_simulations[[3]]          # 1991-2010
+  diet_years <- sort(unique(unlist(seal_diet_years)))
+  eaten_by_year <- t(sapply(diet_years, function(year)
+    fish_eaten_by_seals(model, last_stretch@n[as.character(year), , ],
+                        last_stretch@n_pp[as.character(year), ], year)))
+  rownames(eaten_by_year) <- diet_years
+  model_share <- t(sapply(seal_diet_years, function(period_years) {
+    eaten_in_period <- colSums(eaten_by_year[as.character(period_years), ])
+    eaten_in_period / sum(eaten_in_period)
+  }))[, colnames(seal_diet_share)]
+  diet_mismatch <- mean((sqrt(model_share) - sqrt(seal_diet_share))^2, na.rm = TRUE)
+  c(cod = cod_mismatch, diet = diet_mismatch)
+}
+fitted_exponent <- NA
+fitted_half_saturation <- NA
+if (Sys.getenv("FIT_FEEDING_RESPONSE", "0") == "1") {
+  stopifnot(prey_switching_on)
+  plain_mismatch <- cod_and_diet_mismatch(with_feeding_response(params_dynamic, 1, NULL))
+  combined_mismatch <- function(exponent, half_saturation) {
+    parts <- tryCatch(
+      cod_and_diet_mismatch(with_feeding_response(params_dynamic, exponent, half_saturation)),
+      error = function(e) c(cod = NA, diet = NA))
+    if (anyNA(parts) || any(!is.finite(parts))) return(c(combined = 1e6, parts))
+    c(combined = mean(parts / plain_mismatch), parts)
+  }
+  # A coarse grid first, to see the whole surface and to pick a start.
+  grid <- expand.grid(exponent = c(1.5, 2, 3, 4), half_saturation = c(0.05, 0.1, 0.2, 0.4, 0.8))
+  grid <- cbind(grid, t(mapply(combined_mismatch, grid$exponent, grid$half_saturation)))
+  cat(sprintf("plain model (no switching): cod mismatch %.4f | diet mismatch %.5f
+",
+              plain_mismatch[["cod"]], plain_mismatch[["diet"]]))
+  cat("mismatch left, as a fraction of the plain model's (combined | cod | diet):\n")
+  for (row in seq_len(nrow(grid))) {
+    cat(sprintf("  exponent %.1f, half-saturation %.2f: %.2f | %.2f | %.2f\n",
+                grid$exponent[row], grid$half_saturation[row], grid$combined[row],
+                grid$cod[row] / plain_mismatch[["cod"]], grid$diet[row] / plain_mismatch[["diet"]]))
+  }
+  best_on_grid <- grid[which.min(grid$combined), ]
+  # Then a search from the best grid point. The exponent is kept above 1 and
+  # the half-saturation above 0 by searching on log(exponent - 1) and
+  # log(half-saturation).
+  feeding_fit <- optim(
+    c(log(best_on_grid$exponent - 1), log(best_on_grid$half_saturation)),
+    function(values) combined_mismatch(1 + exp(values[1]), exp(values[2]))[["combined"]],
+    control = list(maxit = 80, reltol = 1e-4))
+  fitted_exponent <- 1 + exp(feeding_fit$par[1])
+  fitted_half_saturation <- exp(feeding_fit$par[2])
+  fitted_parts <- combined_mismatch(fitted_exponent, fitted_half_saturation)
+  cat(sprintf("fitted feeding response: exponent %.2f, half-saturation %.3f of calibrated availability | mismatch left %.2f (cod %.2f, diet %.2f)\n",
+              fitted_exponent, fitted_half_saturation, fitted_parts[["combined"]],
+              fitted_parts[["cod"]] / plain_mismatch[["cod"]],
+              fitted_parts[["diet"]] / plain_mismatch[["diet"]]))
+  params_dynamic <- with_feeding_response(params_dynamic, fitted_exponent, fitted_half_saturation)
+  state_in_1961 <- spin_up_to_1961(params_dynamic)
+}
+
 if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
   count_years <- as.character(1961:2010)
   mismatch_with_counts <- function(values) {
-    numbers <- tryCatch(seal_numbers_in(run_from_1961(exp(values[1]), max(values[2], 0),
-                                                      exp(values[3]))),
-                        error = function(e) NULL)
-    if (is.null(numbers) || any(!is.finite(numbers)) || any(numbers <= 0)) return(1e6)
+    stretch_simulations <- tryCatch(run_from_1961(exp(values[1]), max(values[2], 0),
+                                                  exp(values[3])),
+                                    error = function(e) NULL)
+    if (is.null(stretch_simulations)) return(1e6)
+    numbers <- seal_numbers_in(stretch_simulations)
+    if (any(!is.finite(numbers)) || any(numbers <= 0)) return(1e6)
+    # No more than one pup a year for each mature female.
+    pups_over_one <- pmax(births_per_female_in(stretch_simulations) - 1, 0)
     mismatch <- if (seal_fit_scale == "log") {
       sum((log(numbers[count_years]) - log(seal_counts[count_years]))^2)
     } else {
@@ -188,7 +328,7 @@ if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
       sum((numbers[count_years] - seal_counts[count_years])^2) /
         mean(seal_counts[count_years])^2
     }
-    mismatch + if (values[2] < 0) 1e3 * values[2]^2 else 0
+    mismatch + 1e3 * sum(pups_over_one^2) + if (values[2] < 0) 1e3 * values[2]^2 else 0
   }
   # Two starting points for the pup limit, since a limit set far too high
   # has no effect and gives the fit nothing to follow.
@@ -204,7 +344,8 @@ if (Sys.getenv("FIT_SEALS_IN_FULL_MODEL", "0") == "1") {
   seal_harvest_rate <- max(fit$par[2], 0)
   seal_pup_limit <- exp(fit$par[3])
 }
-simulations <- c(list(spin_up), run_from_1961(seal_erepro, seal_harvest_rate, seal_pup_limit))
+simulations <- c(list(state_in_1961$simulation),
+                 run_from_1961(seal_erepro, seal_harvest_rate, seal_pup_limit))
 growing_params <- params_dynamic
 growing_params@species_params$erepro[is_seal] <- seal_erepro
 growing_params@species_params$R_max[is_seal]  <- seal_pup_limit
@@ -242,11 +383,8 @@ seal_pred_rate_in <- function(year) {
     "Grey Seal", fish_size_bins]
 }
 eaten <- t(sapply(years, function(year) {
-  state <- state_in(year); pred_rate <- seal_pred_rate_in(year)
-  preference <- seal_preference_given(state$n)
-  sapply(fish, function(species)
-    sum(preference[species] * pred_rate *
-          state$n[species, ] * params@w * params@dw)) / 1e9
+  state <- state_in(year)
+  fish_eaten_by_seals(growing_params, state$n, state$n_pp, year)
 }))
 rownames(eaten) <- years
 seal_mortality_on <- function(species, year, sizes) {
@@ -265,7 +403,10 @@ saveRDS(list(biomass = biomass, catch = catch, seal_numbers = seal_numbers,
              seal_erepro = seal_erepro, seal_harvest_rate = seal_harvest_rate,
              seal_pup_limit = seal_pup_limit, prey_switching_on = prey_switching_on,
              prey_without_switching = prey_without_switching,
-             switching_exponent = as.numeric(Sys.getenv("SWITCHING_EXPONENT", smout_switching_exponent)),
+             switching_exponent = if (is.na(fitted_exponent))
+               as.numeric(Sys.getenv("SWITCHING_EXPONENT", smout_switching_exponent)) else fitted_exponent,
+             prey_half_saturation = if (is.na(fitted_half_saturation))
+               as.numeric(Sys.getenv("PREY_HALF_SATURATION", NA)) else fitted_half_saturation,
              model_diet_share = model_diet_share, measured_diet_share = seal_diet_share),
         file.path(work_folder, "dynamic_seal_run.rds"))
 
@@ -287,6 +428,17 @@ for (year in c(1961, 1970, 1980, 1990, 1995, 2000, 2005, 2010)) {
               sum(biomass[y, fitted_species]) / region_area_m2))
 }
 
+cat("\nyear | mature females (thousand) | pups born (thousand) | pups per mature female | pups recruited (thousand) | share of pups recruited\n")
+for (year in c(1961, 1970, 1980, 1990, 1995, 2000, 2005, 2010)) {
+  state <- state_in(year)
+  pups <- seal_births_in(growing_params, state$n, state$n_pp, year)
+  # mizer's Beverton-Holt limit: recruits level off at R_max as births rise
+  recruits <- pups[["births"]] * seal_pup_limit / (pups[["births"]] + seal_pup_limit)
+  cat(sprintf("%d | %6.1f | %6.1f | %.2f | %6.1f | %.2f\n", year,
+              pups[["mature_females"]] / 1000, pups[["births"]] / 1000,
+              pups[["births"]] / pups[["mature_females"]], recruits / 1000,
+              recruits / pups[["births"]]))
+}
 cat(sprintf("\nprey switching: %s%s\n", if (prey_switching_on) "on" else "off",
             if (prey_switching_on && length(prey_without_switching) > 0)
               paste0(", but not for ", paste(prey_without_switching, collapse = ", ")) else ""))

@@ -67,7 +67,11 @@ Rscript dynamic_seal_trial/plot_seal_on_bowen_diet.R
   both measured periods. With `FIT_SEALS_IN_FULL_MODEL=1` it first fits the
   seal's reproductive efficiency and harvest rate, and the limit on pups
   recruited a year, to the counts inside the full model. `SEAL_RATES_FROM`
-  takes those three from an earlier run file instead.
+  takes those three from an earlier run file instead. That fit keeps the
+  seal to no more than one pup a year for each mature female, and the script
+  prints pups born and recruited through time. With `FIT_FEEDING_RESPONSE=1`
+  it fits the exponent and half-saturation of the Type III response to the
+  cod survey (1970-2004) and the two measured diets (handover section 36).
 - `seal_prey_switching.R`: prey switching for the seal, after Smout et al.
   (2014, ICES J. Mar. Sci. 71: 81-89). The seal's preference for a prey is
   multiplied by (availability now / availability in the calibrated state)^0.5,
